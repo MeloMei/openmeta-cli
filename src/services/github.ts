@@ -356,7 +356,12 @@ export class GitHubService {
             per_page: SEARCH_RESULTS_PER_PAGE,
           },
         )) {
-          const pageItems = (response as unknown as { data: { items: SearchIssueItem[] } }).data.items;
+          // @octokit/plugin-paginate-rest normalizes the paginated responses.
+          // For search endpoints, it places the items array directly in response.data.
+          const pageItems: SearchIssueItem[] = Array.isArray((response as any).data)
+            ? (response as any).data
+            : [];
+          
           items.push(...pageItems);
         }
         return items;

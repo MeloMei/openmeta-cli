@@ -227,10 +227,7 @@ describe('GitHubService internals', () => {
         iterator: async function* () {
           searchCalls += 1;
           yield {
-            data: {
-              total_count: 0,
-              items: [],
-            },
+            data: [],
           };
         },
       },
