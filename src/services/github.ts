@@ -347,6 +347,7 @@ export class GitHubService {
     const items: SearchIssueItem[] = [];
     let attempt = 0;
     let pagesFetched = 0;
+    let currentPage = 1;
 
     while (attempt < MAX_PAGINATION_RETRIES) {
       try {
@@ -357,6 +358,7 @@ export class GitHubService {
             sort: 'updated',
             order: 'desc',
             per_page: SEARCH_RESULTS_PER_PAGE,
+            page: currentPage,
           },
         )) {
           const pageItems: SearchIssueItem[] = Array.isArray((response as any).data)
@@ -365,6 +367,7 @@ export class GitHubService {
 
           items.push(...pageItems);
           pagesFetched++;
+          currentPage++;
 
           if (pagesFetched >= MAX_SEARCH_PAGES) {
             logger.debug(`Reached page limit (${MAX_SEARCH_PAGES}). Stopping pagination.`);
@@ -378,26 +381,30 @@ export class GitHubService {
         const isRateLimit = err.status === 403 || err.status === 429;
 
         if (isRateLimit) {
-          if (items.length > 0) {
-            logger.warn(`Rate limited during pagination after fetching ${items.length} items. Returning partial results.`);
-            return items;
-          }
-
           if (attempt < MAX_PAGINATION_RETRIES) {
             const resetHeader = err.headers?.['x-ratelimit-reset'];
-            let delayMs = RATE_LIMIT_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+            const retryAfterHeader = err.headers?.['retry-after'];
 
-            if (resetHeader) {
+            // Default conservative fallback if no headers are provided (60s + slight exponential backoff)
+            let delayMs = 60_000 + RATE_LIMIT_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+
+            if (retryAfterHeader) {
+              delayMs = parseInt(retryAfterHeader, 10) * 1000 + 500;
+            } else if (resetHeader) {
               const resetTime = parseInt(resetHeader, 10) * 1000;
               const waitMs = resetTime - Date.now();
               if (waitMs > 0) {
-                delayMs = Math.min(waitMs + 500, 60_000);
+                delayMs = waitMs + 500; // Trust GitHub's reset time without arbitrary 60s math.min cap
               }
             }
 
             logger.warn(`Rate limited during pagination (attempt ${attempt}/${MAX_PAGINATION_RETRIES}). Retrying in ${Math.round(delayMs / 1000)}s...`);
             await this.delay(delayMs);
             continue;
+          } else if (items.length > 0) {
+            // MAX_PAGINATION_RETRIES exhausted, but we have some data. Graceful return.
+            logger.warn(`Pagination retries exhausted. Yielding ${items.length} items collected so far.`);
+            return items;
           }
         }
 
