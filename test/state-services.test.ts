@@ -130,6 +130,54 @@ describe('stateful services', () => {
     expect(memoryService.renderMarkdown(nextMemory)).toContain('## Validation Failure Signals');
   });
 
+  test('memory service fills defaults when loading legacy partial state', () => {
+    const targetPath = memoryService.getPath('acme/demo');
+    mkdirSync(join(tempRoot, '.openmeta', 'repo-memory'), { recursive: true });
+    writeFileSync(targetPath, JSON.stringify({
+      repoFullName: 'acme/demo',
+      recentIssues: [
+        {
+          reference: 'acme/demo#42',
+          title: 'Legacy record',
+          overallScore: 81,
+          generatedAt: '2026-04-10T08:00:00.000Z',
+        },
+      ],
+    }), 'utf-8');
+
+    const loaded = memoryService.load('acme/demo');
+
+    expect(loaded.detectedTestCommands).toEqual([]);
+    expect(loaded.runStats.totalRuns).toBe(0);
+    expect(loaded.recentIssues[0]?.changedFiles).toEqual([]);
+    expect(loaded.recentIssues[0]?.published).toBe(false);
+    expect(loaded.recentIssues[0]?.reviewRequired).toBe(false);
+    expect(loaded.recentIssues[0]?.status).toBe('selected');
+    expect(loaded.recentIssues[0]?.validationSummary).toBe('not run');
+  });
+
+  test('memory service records draft-only outcomes without validation failures', () => {
+    memoryService.update(createRankedIssue(), createWorkspace());
+    const nextMemory = memoryService.recordOutcome({
+      issue: createRankedIssue(),
+      workspace: createWorkspace(),
+      changedFiles: [],
+      validationResults: [],
+      published: false,
+      pullRequestUrl: undefined,
+      reviewRequired: false,
+    });
+    const markdown = memoryService.renderMarkdown(nextMemory);
+
+    expect(nextMemory.runStats.totalRuns).toBe(1);
+    expect(nextMemory.runStats.successfulValidationRuns).toBe(0);
+    expect(nextMemory.runStats.failedValidationRuns).toBe(0);
+    expect(nextMemory.recentIssues[0]?.status).toBe('draft_only');
+    expect(nextMemory.validationSignals).toEqual([]);
+    expect(markdown).toContain('- No validation failures recorded');
+    expect(markdown).toContain('candidate 1 | changed 0 | validation 0 | published 0');
+  });
+
   test('inbox service deduplicates items and keeps higher scores first', () => {
     inboxService.saveItem(createInboxItem({ id: 'one', overallScore: 70, repoFullName: 'acme/one', issueNumber: 1 }));
     const items = inboxService.saveItem(createInboxItem({ id: 'two', overallScore: 90, repoFullName: 'acme/two', issueNumber: 2 }));
@@ -146,6 +194,25 @@ describe('stateful services', () => {
     expect(records).toHaveLength(1);
     expect(markdown).toContain('Published Runs: 1');
     expect(markdown).toContain('pr=https://github.com/acme/demo/pull/123');
+  });
+
+  test('proof-of-work service summarizes empty and unpublished activity correctly', () => {
+    const emptyMarkdown = proofOfWorkService.renderMarkdown([]);
+    const records = proofOfWorkService.record(createProofRecord({
+      id: 'acme/demo#40@1',
+      repoFullName: 'acme/demo',
+      issueNumber: 40,
+      published: false,
+      pullRequestUrl: undefined,
+    }));
+    const markdown = proofOfWorkService.renderMarkdown(records);
+
+    expect(emptyMarkdown).toContain('- Total Draft Contributions: 0');
+    expect(emptyMarkdown).toContain('- Unique Repositories: 0');
+    expect(emptyMarkdown).toContain('- None yet');
+    expect(markdown).toContain('- Published Runs: 0');
+    expect(markdown).toContain('- Unique Repositories: 1');
+    expect(markdown).not.toContain(' | pr=');
   });
 
   test('run history service records command lifecycle and error details', () => {
