@@ -122,7 +122,7 @@ export class ContributionPrService {
       };
     } catch (error) {
       const err = error as { status?: number };
-      if (err.status && err.status !== 404) {
+      if (err.status !== 404) {
         throw error;
       }
     }
