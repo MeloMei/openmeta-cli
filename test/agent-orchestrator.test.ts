@@ -7,13 +7,14 @@ import { AgentOrchestrator } from '../src/orchestration/agent.js';
 import { contributionPrService, gitService, githubService, inboxService, issueRankingService, llmService, proofOfWorkService } from '../src/services/index.js';
 import type {
   AppConfig,
+  ContributionAgentResult,
   ContributionInboxItem,
   ProofOfWorkRecord,
   RankedIssue,
   RepoWorkspaceContext,
   TestResult,
 } from '../src/types/index.js';
-import { createInboxItem, createPatchDraft, createProofRecord, createPullRequestDraft, createRankedIssue, createWorkspace } from './helpers/factories.js';
+import { createInboxItem, createMemory, createPatchDraft, createProofRecord, createPullRequestDraft, createRankedIssue, createWorkspace } from './helpers/factories.js';
 
 interface AgentOrchestratorInternals {
   validateConfig(config: AppConfig, options?: { requireLlm?: boolean }): Promise<void>;
@@ -61,6 +62,40 @@ interface AgentOrchestratorInternals {
     validationResults: TestResult[];
     pullRequestUrl?: string;
   }): Promise<{ published: boolean }>;
+  renderAgentStage(
+    currentStage: 'scout' | 'select' | 'prepare' | 'draft' | 'validate' | 'pr' | 'publish',
+    completedStages: Set<'scout' | 'select' | 'prepare' | 'draft' | 'validate' | 'pr' | 'publish'>,
+    subtitle: string,
+    failed?: boolean,
+  ): void;
+  renderOpportunityList(title: string, issues: RankedIssue[]): void;
+  showSelectedOpportunity(issue: RankedIssue, headless: boolean): void;
+  showWorkspaceSummary(workspace: RepoWorkspaceContext, memory: ReturnType<typeof createMemory>): void;
+  showValidationSummary(workspace: RepoWorkspaceContext, changedFiles: string[]): void;
+  showArtifactPreview(input: {
+    issue: RankedIssue;
+    artifactRelativeDir: string;
+    draftTitle: string;
+    changedFiles: string[];
+    validationResults: TestResult[];
+    pullRequestUrl?: string;
+  }): void;
+  prepareLocalArtifactPaths(issue: RankedIssue): ContributionAgentResult['artifacts'];
+  writeLocalArtifacts(input: {
+    artifacts: ContributionAgentResult['artifacts'];
+    dossier: string;
+    patchDraftMarkdown: string;
+    prDraftMarkdown: string;
+    memoryMarkdown: string;
+    inboxMarkdown: string;
+    proofMarkdown: string;
+  }): void;
+  showResult(result: ContributionAgentResult): void;
+  showStructuredReviewNotice(input: {
+    title: string;
+    subtitle: string;
+    lines?: string[];
+  }): void;
   showInbox(): Promise<void>;
   showProofOfWork(): Promise<void>;
 }
@@ -497,6 +532,119 @@ describe('AgentOrchestrator support behavior', () => {
     expect(emptyStateSpy).toHaveBeenCalledTimes(2);
     expect(recordListSpy).toHaveBeenCalledTimes(2);
     expect(statsSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test('renders stage, opportunity, workspace, validation, artifact, and result summaries through the UI facade', () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const issue = createRankedIssue({
+      body: 'Line one.\n\nLine two with extra context.',
+      labels: ['good first issue', 'help wanted'],
+    });
+    const workspace = createWorkspace({
+      validationWarnings: ['Skipped npm run lint in headless mode.'],
+      testResults: [
+        { command: 'bun test', exitCode: 0, passed: true, output: '2 passed' },
+        { command: 'npm run lint', exitCode: 127, passed: false, output: 'command not found' },
+      ],
+    });
+    const memory = createMemory();
+    const stepperSpy = spyOn(infra.ui, 'stepper').mockImplementation(() => {});
+    const sectionSpy = spyOn(infra.ui, 'section').mockImplementation(() => {});
+    const recordListSpy = spyOn(infra.ui, 'recordList').mockImplementation(() => {});
+    const cardSpy = spyOn(infra.ui, 'card').mockImplementation(() => {});
+    const statsSpy = spyOn(infra.ui, 'stats').mockImplementation(() => {});
+    const keyValuesSpy = spyOn(infra.ui, 'keyValues').mockImplementation(() => {});
+    const calloutSpy = spyOn(infra.ui, 'callout').mockImplementation(() => {});
+    const heroSpy = spyOn(infra.ui, 'hero').mockImplementation(() => {});
+
+    orchestrator.renderAgentStage('draft', new Set(['scout', 'select']), 'Drafting now.', true);
+    orchestrator.renderOpportunityList('Top issues', [issue]);
+    orchestrator.showSelectedOpportunity(issue, true);
+    orchestrator.showWorkspaceSummary(workspace, memory);
+    orchestrator.showValidationSummary(workspace, ['src/app.ts']);
+    orchestrator.showArtifactPreview({
+      issue,
+      artifactRelativeDir: 'contributions/2026-06-03/acme__demo__42',
+      draftTitle: 'Add aria-label handling',
+      changedFiles: ['src/app.ts'],
+      validationResults: workspace.testResults,
+      pullRequestUrl: 'https://github.com/acme/demo/pull/42',
+    });
+    orchestrator.showStructuredReviewNotice({
+      title: 'Needs review',
+      subtitle: 'Take a look before publishing.',
+      lines: ['Line one'],
+    });
+    orchestrator.showResult({
+      issue,
+      workspace,
+      memory,
+      patchDraft: createPatchDraft(),
+      prDraft: createPullRequestDraft(),
+      dossier: '# Dossier',
+      artifacts: {
+        artifactDir: '/tmp/openmeta/artifacts',
+        dossierPath: '/tmp/openmeta/artifacts/dossier.md',
+        patchDraftPath: '/tmp/openmeta/artifacts/patch-draft.md',
+        prDraftPath: '/tmp/openmeta/artifacts/pr-draft.md',
+        memoryPath: '/tmp/openmeta/artifacts/memory.md',
+        inboxPath: '/tmp/openmeta/artifacts/inbox.md',
+        proofOfWorkPath: '/tmp/openmeta/artifacts/proof.md',
+      },
+      inboxItem: createInboxItem(),
+      proofRecord: createProofRecord({ published: true }),
+      changedFiles: ['src/app.ts'],
+      pullRequestUrl: 'https://github.com/acme/demo/pull/42',
+    });
+
+    expect(stepperSpy).toHaveBeenCalledTimes(1);
+    expect(sectionSpy).toHaveBeenCalledWith('Draft patch stage', 'Drafting now.');
+    expect(recordListSpy).toHaveBeenCalled();
+    expect(cardSpy).toHaveBeenCalled();
+    expect(statsSpy).toHaveBeenCalled();
+    expect(keyValuesSpy).toHaveBeenCalled();
+    expect(calloutSpy).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Needs review',
+      subtitle: 'Take a look before publishing.',
+      lines: ['Line one'],
+      tone: 'warning',
+    }));
+    expect(heroSpy).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'The contribution arc landed cleanly',
+      tone: 'success',
+    }));
+  });
+
+  test('shows a validation-empty callout and writes local artifact files', () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const issue = createRankedIssue({ repoFullName: 'acme/demo', number: 44 });
+    const calloutSpy = spyOn(infra.ui, 'callout').mockImplementation(() => {});
+    const statsSpy = spyOn(infra.ui, 'stats').mockImplementation(() => {});
+    const artifactPaths = orchestrator.prepareLocalArtifactPaths(issue);
+
+    orchestrator.showValidationSummary(createWorkspace({
+      validationCommands: [],
+      testCommands: [],
+      testResults: [],
+    }), []);
+
+    orchestrator.writeLocalArtifacts({
+      artifacts: artifactPaths,
+      dossier: '# Dossier',
+      patchDraftMarkdown: '# Patch',
+      prDraftMarkdown: '# PR',
+      memoryMarkdown: '# Memory',
+      inboxMarkdown: '# Inbox',
+      proofMarkdown: '# Proof',
+    });
+
+    expect(statsSpy).toHaveBeenCalledTimes(1);
+    expect(calloutSpy).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Validation was not executed',
+      tone: 'warning',
+    }));
+    expect(Bun.file(artifactPaths.dossierPath).exists()).resolves.toBe(true);
+    expect(Bun.file(artifactPaths.proofOfWorkPath).exists()).resolves.toBe(true);
   });
 
   test('scout renders an empty state when no issues meet the thresholds', async () => {
