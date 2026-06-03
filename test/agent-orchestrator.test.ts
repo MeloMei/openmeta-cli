@@ -113,6 +113,7 @@ interface AgentOrchestratorInternals {
   getOriginRemoteUrl(git: {
     getRemotes(verbose: boolean): Promise<Array<{ name: string; refs: { fetch?: string; push?: string } }>>;
   }): Promise<string>;
+  getGitHubRepositoryInfo(owner: string, repo: string): Promise<{ default_branch?: string }>;
   prepareLocalRepository(git: {
     fetch(remote: string, branch: string): Promise<void>;
     checkout(args: string[] | string): Promise<void>;
@@ -826,6 +827,32 @@ describe('AgentOrchestrator support behavior', () => {
       defaultBranch: 'trunk',
       hasCommits: false,
     });
+  });
+
+  test('getGitHubRepositoryInfo requires octokit and returns repository metadata when initialized', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+
+    await expect(orchestrator.getGitHubRepositoryInfo('octocat', 'openmeta-daily')).rejects.toThrow(
+      'GitHub service not initialized',
+    );
+
+    (orchestrator as unknown as { octokit: unknown }).octokit = {
+      rest: {
+        repos: {
+          get: async ({ owner, repo }: { owner: string; repo: string }) => ({
+            data: {
+              owner,
+              name: repo,
+              default_branch: 'main',
+            },
+          }),
+        },
+      },
+    };
+
+    await expect(orchestrator.getGitHubRepositoryInfo('octocat', 'openmeta-daily')).resolves.toEqual(expect.objectContaining({
+      default_branch: 'main',
+    }));
   });
 
   test('manages origin remotes, parses existing origin URLs, and fails clearly when origin is missing', async () => {
