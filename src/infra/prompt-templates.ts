@@ -131,6 +131,46 @@ Repo Memory:
 {{repoMemory}}
 `;
 
+export const PATCH_DRAFT_REPAIR_PROMPT = `You are OpenMeta, an autonomous open source contribution agent.
+
+The previous patch draft response was not parseable or did not match the required schema. Reformat it into strict JSON.
+
+Required schema:
+{
+  "version": "1",
+  "kind": "patch_draft",
+  "status": "success" | "needs_review",
+  "data": {
+    "goal": "what the patch should achieve",
+    "targetFiles": [
+      {
+        "path": "relative/path/to/file",
+        "reason": "why this file matters"
+      }
+    ],
+    "proposedChanges": [
+      {
+        "title": "short step title",
+        "details": "specific implementation details",
+        "files": ["relative/path/to/file"]
+      }
+    ],
+    "risks": ["concrete risk"],
+    "validationNotes": ["concrete validation note"]
+  }
+}
+
+Rules:
+1. Return only one valid JSON object. No commentary.
+2. Preserve the original intended patch plan when possible.
+3. Keep target files repository-relative and concrete.
+4. If the previous response is unusable, return:
+{"version":"1","kind":"patch_draft","status":"needs_review","data":{"goal":"Insufficient context for a safe patch draft.","targetFiles":[{"path":"README.md","reason":"Placeholder target when the prior response is unusable."}],"proposedChanges":[{"title":"Needs review","details":"The previous patch draft could not be safely reconstructed.","files":["README.md"]}],"risks":["The prior model response was unusable."],"validationNotes":["Review the issue and repository context before generating a new patch draft."]}}
+
+Previous response:
+{{invalidResponse}}
+`;
+
 export const CODE_CHANGE_PROMPT = `You are OpenMeta, an autonomous open source contribution agent.
 
 Generate a concrete implementation patch in strict JSON.

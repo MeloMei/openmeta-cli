@@ -2,15 +2,33 @@ import { describe, expect, test } from 'bun:test';
 import { LLMService } from '../src/services/llm.js';
 import type { StructuredOutputStatus } from '../src/contracts/index.js';
 import type { ImplementationDraft, MatchedIssue } from '../src/types/index.js';
-import { createIssue, createMemory } from './helpers/factories.js';
+import { createIssue, createMemory, createRankedIssue, createWorkspace } from './helpers/factories.js';
 
 interface LLMServiceInternals {
   validateConnection(): Promise<boolean>;
   getLastValidationError(): string | null;
+  generatePatchDraft(
+    issue: ReturnType<typeof createRankedIssue>,
+    workspace: ReturnType<typeof createWorkspace>,
+    memory: ReturnType<typeof createMemory>,
+  ): Promise<{
+    status: StructuredOutputStatus;
+    data: {
+      goal: string;
+      targetFiles: Array<{ path: string; reason: string }>;
+      proposedChanges: Array<{ title: string; details: string; files: string[] }>;
+      risks: string[];
+      validationNotes: string[];
+    };
+  }>;
   client: {
     chat: {
       completions: {
-        create: () => Promise<unknown>;
+        create: (payload: {
+          model: string;
+          messages: Array<{ role: string; content: string }>;
+          temperature: number;
+        }) => Promise<unknown>;
       };
     };
   } | null;
@@ -343,6 +361,71 @@ describe('LLMService pull request draft parsing', () => {
     expect(draft.status).toBe('success');
     expect(draft.data.title).toBe('Add aria-label handling to icon-only buttons');
     expect(draft.data.changes).toEqual(['Update the shared IconButton component']);
+  });
+});
+
+describe('LLMService patch draft generation', () => {
+  test('repairs a non-JSON first draft into a valid patch draft envelope', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals;
+    const prompts: string[] = [];
+
+    service.client = {
+      chat: {
+        completions: {
+          create: async (payload) => {
+            prompts.push(payload.messages[1]?.content ?? '');
+
+            if (prompts.length === 1) {
+              return {
+                choices: [{ message: { content: 'Plan: update the button component and tests.' } }],
+              };
+            }
+
+            return {
+              choices: [{
+                message: {
+                  content: JSON.stringify({
+                    version: '1',
+                    kind: 'patch_draft',
+                    status: 'success',
+                    data: {
+                      goal: 'Add accessible labels to icon-only buttons',
+                      targetFiles: [
+                        {
+                          path: 'src/components/IconButton.tsx',
+                          reason: 'Primary component logic',
+                        },
+                      ],
+                      proposedChanges: [
+                        {
+                          title: 'Update button API',
+                          details: 'Require an accessible label for icon-only rendering.',
+                          files: ['src/components/IconButton.tsx'],
+                        },
+                      ],
+                      risks: ['Consumer code may rely on current behavior'],
+                      validationNotes: ['Run bun test after the patch'],
+                    },
+                  }),
+                },
+              }],
+            };
+          },
+        },
+      },
+    };
+
+    const draft = await service.generatePatchDraft(
+      createRankedIssue(),
+      createWorkspace({ validationCommands: createWorkspace().testCommands }),
+      createMemory(),
+    );
+
+    expect(draft.status).toBe('success');
+    expect(draft.data.goal).toBe('Add accessible labels to icon-only buttons');
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('The previous patch draft response was not parseable');
+    expect(prompts[1]).toContain('Plan: update the button component and tests.');
   });
 });
 

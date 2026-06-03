@@ -38,6 +38,7 @@ import {
   DAILY_REPORT_GENERATE_PROMPT,
   DAILY_DIARY_GENERATE_PROMPT,
   PATCH_DRAFT_PROMPT,
+  PATCH_DRAFT_REPAIR_PROMPT,
   PR_DRAFT_PROMPT,
   VALIDATION_REPAIR_PROMPT,
 } from '../infra/prompt-templates.js';
@@ -188,6 +189,7 @@ Repo Stars: ${i.repoStars}`
     return this.generateStructuredOutput({
       prompt,
       parser: this.parsePatchDraft.bind(this),
+      repairPrompt: PATCH_DRAFT_REPAIR_PROMPT,
     });
   }
 
