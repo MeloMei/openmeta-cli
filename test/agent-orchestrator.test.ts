@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import * as simpleGitModule from 'simple-git';
 import * as infra from '../src/infra/index.js';
 import { AgentOrchestrator } from '../src/orchestration/agent.js';
 import { contributionPrService, gitService, githubService, inboxService, issueRankingService, llmService, proofOfWorkService } from '../src/services/index.js';
@@ -96,6 +97,32 @@ interface AgentOrchestratorInternals {
     subtitle: string;
     lines?: string[];
   }): void;
+  confirmManualHeadlessRun(config: AppConfig): Promise<void>;
+  promptForCommitConfirmation(): Promise<boolean>;
+  promptForFinalCommitConfirmation(commitMessage: string): Promise<boolean>;
+  promptForContributionPrConfirmation(issue: RankedIssue): Promise<boolean>;
+  promptForFailedValidationConfirmation(): Promise<boolean>;
+  ensureManagedRemoteRepo(
+    username: string,
+    repoName: string,
+  ): Promise<{ cloneUrl: string; defaultBranch: string; hasCommits: boolean }>;
+  ensureOriginRemote(git: {
+    getRemotes(verbose: boolean): Promise<Array<{ name: string; refs: { fetch?: string; push?: string } }>>;
+    addRemote(name: string, url: string): Promise<void>;
+  }, remoteUrl: string): Promise<void>;
+  getOriginRemoteUrl(git: {
+    getRemotes(verbose: boolean): Promise<Array<{ name: string; refs: { fetch?: string; push?: string } }>>;
+  }): Promise<string>;
+  prepareLocalRepository(git: {
+    fetch(remote: string, branch: string): Promise<void>;
+    checkout(args: string[] | string): Promise<void>;
+    branchLocal(): Promise<{ all: string[] }>;
+    checkoutLocalBranch(branch: string): Promise<void>;
+    status(): Promise<{ current?: string; tracking?: string }>;
+    commit(message: string, options?: Record<string, unknown>): Promise<void>;
+    raw(args: string[]): Promise<void>;
+  }, defaultBranch: string, hasRemoteCommits: boolean): Promise<void>;
+  ensureTargetRepo(config: AppConfig): Promise<{ path: string; owner: string; repo: string; defaultBranch: string }>;
   showInbox(): Promise<void>;
   showProofOfWork(): Promise<void>;
 }
@@ -664,5 +691,229 @@ describe('AgentOrchestrator support behavior', () => {
       'No issues found',
       'No issues met the current scoring thresholds.',
     );
+  });
+
+  test('collects confirmations for headless and publish prompts', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const promptSpy = spyOn(infra, 'prompt')
+      .mockResolvedValueOnce({ acknowledgeRisk: true })
+      .mockResolvedValueOnce({ finalConsent: true })
+      .mockResolvedValueOnce({ confirmCommit: true })
+      .mockResolvedValueOnce({ finalConfirm: false })
+      .mockResolvedValueOnce({ confirmPr: true })
+      .mockResolvedValueOnce({ continueWithFailures: false });
+
+    await expect(orchestrator.confirmManualHeadlessRun(createConfig())).resolves.toBeUndefined();
+    await expect(orchestrator.promptForCommitConfirmation()).resolves.toBe(true);
+    await expect(orchestrator.promptForFinalCommitConfirmation('feat: test')).resolves.toBe(false);
+    await expect(orchestrator.promptForContributionPrConfirmation(createRankedIssue())).resolves.toBe(true);
+    await expect(orchestrator.promptForFailedValidationConfirmation()).resolves.toBe(false);
+    expect(promptSpy).toHaveBeenCalledTimes(6);
+  });
+
+  test('cancels headless mode when acknowledgements are declined', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+
+    spyOn(infra, 'prompt').mockResolvedValueOnce({ acknowledgeRisk: false });
+    await expect(orchestrator.confirmManualHeadlessRun(createConfig())).rejects.toThrow(
+      'Headless agent run cancelled because the warning was not acknowledged.',
+    );
+
+    spyOn(infra, 'prompt')
+      .mockResolvedValueOnce({ acknowledgeRisk: true })
+      .mockResolvedValueOnce({ finalConsent: false });
+    await expect(orchestrator.confirmManualHeadlessRun(createConfig())).rejects.toThrow(
+      'Headless agent run cancelled at final confirmation.',
+    );
+  });
+
+  test('ensureManagedRemoteRepo reads existing remotes, creates missing ones, and requires octokit initialization', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+
+    await expect(orchestrator.ensureManagedRemoteRepo('octocat', 'openmeta-daily')).rejects.toThrow(
+      'GitHub service not initialized',
+    );
+
+    (orchestrator as unknown as { octokit: unknown }).octokit = {
+      rest: {
+        repos: {
+          get: async () => ({
+            data: {
+              html_url: 'https://github.com/octocat/openmeta-daily',
+              clone_url: 'https://github.com/octocat/openmeta-daily.git',
+              default_branch: 'main',
+              pushed_at: '2026-06-03T00:00:00.000Z',
+            },
+          }),
+        },
+      },
+    };
+    await expect(orchestrator.ensureManagedRemoteRepo('octocat', 'openmeta-daily')).resolves.toEqual({
+      cloneUrl: 'https://github.com/octocat/openmeta-daily.git',
+      defaultBranch: 'main',
+      hasCommits: true,
+    });
+
+    (orchestrator as unknown as { octokit: unknown }).octokit = {
+      rest: {
+        repos: {
+          get: async () => {
+            throw { status: 404 };
+          },
+          createForAuthenticatedUser: async () => ({
+            data: {
+              clone_url: 'https://github.com/octocat/openmeta-daily.git',
+              default_branch: 'trunk',
+            },
+          }),
+        },
+      },
+    };
+    await expect(orchestrator.ensureManagedRemoteRepo('octocat', 'openmeta-daily')).resolves.toEqual({
+      cloneUrl: 'https://github.com/octocat/openmeta-daily.git',
+      defaultBranch: 'trunk',
+      hasCommits: false,
+    });
+  });
+
+  test('manages origin remotes, parses existing origin URLs, and fails clearly when origin is missing', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    let addedRemote = '';
+
+    await orchestrator.ensureOriginRemote({
+      getRemotes: async () => [],
+      addRemote: async (name, url) => {
+        addedRemote = `${name}:${url}`;
+      },
+    }, 'https://github.com/octocat/openmeta-daily.git');
+    expect(addedRemote).toBe('origin:https://github.com/octocat/openmeta-daily.git');
+
+    await orchestrator.ensureOriginRemote({
+      getRemotes: async () => [{
+        name: 'origin',
+        refs: {
+          fetch: 'https://github.com/other/repo.git',
+          push: 'https://github.com/other/repo.git',
+        },
+      }],
+      addRemote: async () => {
+        throw new Error('should not add a new remote');
+      },
+    }, 'https://github.com/octocat/openmeta-daily.git');
+
+    await expect(orchestrator.getOriginRemoteUrl({
+      getRemotes: async () => [],
+    })).rejects.toThrow('Target repository does not have an origin remote configured.');
+
+    await expect(orchestrator.getOriginRemoteUrl({
+      getRemotes: async () => [{
+        name: 'origin',
+        refs: {
+          push: 'git@github.com:octocat/openmeta-daily.git',
+        },
+      }],
+    })).resolves.toBe('git@github.com:octocat/openmeta-daily.git');
+  });
+
+  test('prepareLocalRepository handles remote sync, fallback checkout, and empty repo bootstrap', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+
+    const syncedCalls: string[] = [];
+    await orchestrator.prepareLocalRepository({
+      fetch: async (remote, branch) => {
+        syncedCalls.push(`fetch:${remote}/${branch}`);
+      },
+      checkout: async (args) => {
+        syncedCalls.push(`checkout:${Array.isArray(args) ? args.join(' ') : args}`);
+      },
+      branchLocal: async () => ({ all: ['main'] }),
+      checkoutLocalBranch: async () => {
+        syncedCalls.push('checkoutLocalBranch');
+      },
+      status: async () => ({ tracking: 'origin/main' }),
+      commit: async () => {
+        syncedCalls.push('commit');
+      },
+      raw: async () => {
+        syncedCalls.push('raw');
+      },
+    }, 'main', true);
+    expect(syncedCalls).toEqual(['fetch:origin/main', 'checkout:-B main origin/main']);
+
+    const bootstrapCalls: string[] = [];
+    await orchestrator.prepareLocalRepository({
+      fetch: async () => {
+        throw new Error('fetch failed');
+      },
+      checkout: async (args) => {
+        bootstrapCalls.push(`checkout:${Array.isArray(args) ? args.join(' ') : args}`);
+      },
+      branchLocal: async () => ({ all: [] }),
+      checkoutLocalBranch: async () => {
+        throw new Error('branch exists elsewhere');
+      },
+      status: async () => ({ current: '', tracking: '' }),
+      commit: async (message) => {
+        bootstrapCalls.push(`commit:${message}`);
+      },
+      raw: async (args) => {
+        bootstrapCalls.push(`raw:${args.join(' ')}`);
+      },
+    }, 'main', false);
+    expect(bootstrapCalls).toEqual([
+      'checkout:-B main',
+      'commit:chore: initialize repository',
+      'raw:push --set-upstream origin main',
+    ]);
+  });
+
+  test('ensureTargetRepo uses configured targets and managed home repositories', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const targetRepoPath = mkdtempSync(join(tmpdir(), 'openmeta-agent-target-repo-'));
+    tempDirs.push(targetRepoPath);
+
+    spyOn(orchestrator as object as { getOriginRemoteUrl: () => Promise<string> }, 'getOriginRemoteUrl').mockResolvedValue(
+      'git@github.com:octocat/custom-target.git',
+    );
+    spyOn(orchestrator as object as { getGitHubRepositoryInfo: () => Promise<{ default_branch: string }> }, 'getGitHubRepositoryInfo').mockResolvedValue({
+      default_branch: 'develop',
+    });
+
+    await expect(orchestrator.ensureTargetRepo(createConfig({
+      github: {
+        pat: 'ghp_test_token',
+        username: 'octocat',
+        targetRepoPath,
+      },
+    }))).resolves.toEqual({
+      path: targetRepoPath,
+      owner: 'octocat',
+      repo: 'custom-target',
+      defaultBranch: 'develop',
+    });
+
+    const repoFactorySpy = spyOn(simpleGitModule, 'simpleGit').mockImplementation(() => ({
+      checkIsRepo: async () => false,
+      init: async () => {},
+    } as never));
+    spyOn(orchestrator as object as { ensureManagedRemoteRepo: () => Promise<unknown> }, 'ensureManagedRemoteRepo').mockResolvedValue({
+      cloneUrl: 'https://github.com/octocat/openmeta-daily.git',
+      defaultBranch: 'main',
+      hasCommits: true,
+    });
+    spyOn(orchestrator as object as { ensureOriginRemote: () => Promise<void> }, 'ensureOriginRemote').mockResolvedValue(undefined);
+    spyOn(orchestrator as object as { prepareLocalRepository: () => Promise<void> }, 'prepareLocalRepository').mockResolvedValue(undefined);
+    (orchestrator as unknown as { octokit: unknown }).octokit = { rest: { repos: {} } };
+
+    const managedTarget = await orchestrator.ensureTargetRepo(createConfig({
+      github: {
+        pat: 'ghp_test_token',
+        username: 'octocat',
+      },
+    }));
+    expect(repoFactorySpy).toHaveBeenCalled();
+    expect(managedTarget.owner).toBe('octocat');
+    expect(managedTarget.repo).toBe('openmeta-daily');
+    expect(managedTarget.defaultBranch).toBe('main');
   });
 });
