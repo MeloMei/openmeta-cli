@@ -4,15 +4,18 @@ import {
   ImplementationDraftEnvelopeSchema,
   IssueMatchListEnvelopeSchema,
   PatchDraftEnvelopeSchema,
+  RepositorySuggestionListEnvelopeSchema,
   type StructuredOutputResult,
   type PatchDraft,
   PullRequestDraftEnvelopeSchema,
   type PullRequestDraft,
+  type RepositoryImprovementSuggestion,
 } from '../contracts/index.js';
 import type {
   GitHubIssue,
   ImplementationDraft,
   LLMProvider,
+  LLMReasoningEffort,
   MatchedIssue,
   RankedIssue,
   RepoFileSnippet,
@@ -40,6 +43,8 @@ import {
   PATCH_DRAFT_PROMPT,
   PATCH_DRAFT_REPAIR_PROMPT,
   PR_DRAFT_PROMPT,
+  REPOSITORY_ANALYSIS_PROMPT,
+  REPOSITORY_ANALYSIS_REPAIR_PROMPT,
   VALIDATION_REPAIR_PROMPT,
 } from '../infra/prompt-templates.js';
 
@@ -47,6 +52,8 @@ export class LLMService {
   private client: OpenAI | null = null;
   private modelName: string = 'gpt-4o-mini';
   private provider: LLMProvider = 'openai';
+  private reasoningEffort: LLMReasoningEffort | undefined;
+  private stream = false;
   private lastValidationError: string | null = null;
 
   initialize(
@@ -55,6 +62,8 @@ export class LLMService {
     modelName?: string,
     apiHeaders?: Record<string, string>,
     provider?: LLMProvider,
+    reasoningEffort?: LLMReasoningEffort,
+    stream?: boolean,
   ): void {
     this.client = new OpenAI({
       apiKey,
@@ -67,6 +76,8 @@ export class LLMService {
     if (provider) {
       this.provider = provider;
     }
+    this.reasoningEffort = reasoningEffort;
+    this.stream = stream === true;
   }
 
   async validateConnection(): Promise<boolean> {
@@ -84,13 +95,15 @@ export class LLMService {
           model: this.modelName,
           messages: [{ role: 'user', content: LLM_VALIDATION_PROMPT }],
           ...LLM_VALIDATION_REQUEST,
+          ...this.getStreamingRequestParams(),
+          ...this.getReasoningRequestParams(),
         }, {
           signal: controller.signal,
         });
 
         // 自定义兼容端点最容易把站点页面或其他 200 响应误判为可用，所以这里额外校验返回结构。
         if (this.provider === 'custom') {
-          this.assertCustomValidationResponse(response);
+          await this.assertCustomValidationResponse(response);
         }
       } finally {
         clearTimeout(timeout);
@@ -193,6 +206,38 @@ Repo Stars: ${i.repoStars}`
     });
   }
 
+  async analyzeRepository(
+    repoFullName: string,
+    workspace: RepoWorkspaceContext,
+    memory: RepoMemory,
+  ): Promise<StructuredOutputResult<'repository_suggestion_list', RepositoryImprovementSuggestion[]>> {
+    const repoContext = [
+      `Repository: ${repoFullName}`,
+      `Workspace Path: ${workspace.workspacePath}`,
+      `Default Branch: ${workspace.defaultBranch}`,
+      `Workspace Dirty: ${workspace.workspaceDirty}`,
+      `Top-Level Files: ${workspace.topLevelFiles.join(', ') || 'none'}`,
+      `Candidate Files: ${workspace.candidateFiles.join(', ') || 'none'}`,
+      `Detected Test Commands: ${workspace.testCommands.map((item) => item.command).join(', ') || 'none'}`,
+      `Runnable Validation Commands: ${workspace.validationCommands.map((item) => item.command).join(', ') || 'none'}`,
+      `Validation Safety Notes: ${workspace.validationWarnings.join(' | ') || 'none'}`,
+      'Snippets:',
+      ...workspace.snippets.map((snippet) => `FILE: ${snippet.path}\n${snippet.content}`),
+    ].join('\n\n');
+
+    const prompt = fillPrompt(REPOSITORY_ANALYSIS_PROMPT, {
+      repoContext,
+      repoMemory: this.formatRepoMemory(memory),
+    });
+
+    return this.generateStructuredOutput({
+      prompt,
+      parser: this.parseRepositorySuggestions.bind(this),
+      repairPrompt: REPOSITORY_ANALYSIS_REPAIR_PROMPT,
+      temperature: 0.2,
+    });
+  }
+
   async generateImplementationDraft(
     issue: RankedIssue,
     workspace: RepoWorkspaceContext,
@@ -282,14 +327,72 @@ Repo Stars: ${i.repoStars}`
           { role: 'user', content: prompt },
         ],
         temperature: options.temperature ?? 0.7,
+        ...this.getStreamingRequestParams(),
+        ...this.getReasoningRequestParams(),
       });
 
-      const content = response.choices[0]?.message?.content || '';
-      return content;
+      return await this.extractChatContent(response);
     } catch (error) {
       logger.debug('LLM chat failed', error);
       throw new Error('The LLM request failed. Please verify your provider, model, and API key.');
     }
+  }
+
+  private async extractChatContent(response: unknown): Promise<string> {
+    if (this.isAsyncIterable(response)) {
+      let content = '';
+
+      for await (const chunk of response) {
+        content += this.extractStreamChunkContent(chunk);
+      }
+
+      return content;
+    }
+
+    return this.extractNonStreamingContent(response);
+  }
+
+  private isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+    return typeof value === 'object' &&
+      value !== null &&
+      Symbol.asyncIterator in value &&
+      typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function';
+  }
+
+  private extractStreamChunkContent(chunk: unknown): string {
+    if (typeof chunk !== 'object' || chunk === null || !('choices' in chunk) || !Array.isArray(chunk.choices)) {
+      return '';
+    }
+
+    const [choice] = chunk.choices;
+    if (typeof choice !== 'object' || choice === null || !('delta' in choice)) {
+      return '';
+    }
+
+    const delta = choice.delta;
+    if (typeof delta !== 'object' || delta === null || !('content' in delta)) {
+      return '';
+    }
+
+    return typeof delta.content === 'string' ? delta.content : '';
+  }
+
+  private extractNonStreamingContent(response: unknown): string {
+    if (typeof response !== 'object' || response === null || !('choices' in response) || !Array.isArray(response.choices)) {
+      return '';
+    }
+
+    const [choice] = response.choices;
+    if (typeof choice !== 'object' || choice === null || !('message' in choice)) {
+      return '';
+    }
+
+    const message = choice.message;
+    if (typeof message !== 'object' || message === null || !('content' in message)) {
+      return '';
+    }
+
+    return typeof message.content === 'string' ? message.content : '';
   }
 
   private async generateStructuredOutput<T>(input: {
@@ -352,6 +455,35 @@ Repo Stars: ${i.repoStars}`
     };
   }
 
+  private getReasoningRequestParams(): { reasoning_effort?: LLMReasoningEffort } {
+    if (!this.reasoningEffort || !this.supportsReasoningEffort()) {
+      return {};
+    }
+
+    return { reasoning_effort: this.reasoningEffort };
+  }
+
+  private getStreamingRequestParams(): { stream?: true; stream_options?: { include_usage: true } } {
+    if (!this.stream) {
+      return {};
+    }
+
+    return {
+      stream: true,
+      stream_options: {
+        include_usage: true,
+      },
+    };
+  }
+
+  private supportsReasoningEffort(): boolean {
+    const normalizedModel = this.modelName.toLowerCase();
+    return normalizedModel.startsWith('gpt-5') ||
+      normalizedModel.startsWith('o1') ||
+      normalizedModel.startsWith('o3') ||
+      normalizedModel.startsWith('o4');
+  }
+
   private parseImplementationDraft(
     content: string,
   ): StructuredOutputResult<'implementation_draft', ImplementationDraft> {
@@ -366,6 +498,19 @@ Repo Stars: ${i.repoStars}`
     content: string,
   ): StructuredOutputResult<'pull_request_draft', PullRequestDraft> {
     return this.parseStructuredJson(content, PullRequestDraftEnvelopeSchema);
+  }
+
+  private parseRepositorySuggestions(
+    content: string,
+  ): StructuredOutputResult<'repository_suggestion_list', RepositoryImprovementSuggestion[]> {
+    const parsed = this.parseStructuredJson(content, RepositorySuggestionListEnvelopeSchema);
+
+    return {
+      version: parsed.version,
+      kind: parsed.kind,
+      status: parsed.status,
+      data: parsed.data.suggestions,
+    };
   }
 
   private parseStructuredJson<T>(content: string, schema: z.ZodType<T>): T {
@@ -527,7 +672,15 @@ Repo Stars: ${i.repoStars}`
     return error instanceof Error && (error.name === 'AbortError' || error.message.toLowerCase().includes('aborted'));
   }
 
-  private assertCustomValidationResponse(response: unknown): void {
+  private async assertCustomValidationResponse(response: unknown): Promise<void> {
+    if (this.isAsyncIterable(response)) {
+      const content = await this.extractChatContent(response);
+      if (content.trim().length === 0) {
+        throw new Error('Custom provider validation response did not include a usable assistant reply.');
+      }
+      return;
+    }
+
     if (typeof response !== 'object' || response === null) {
       throw new Error('Custom provider validation response did not match the expected OpenAI-compatible format.');
     }

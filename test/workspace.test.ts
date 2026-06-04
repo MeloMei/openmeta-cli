@@ -4,7 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { simpleGit } from 'simple-git';
 import { workspaceService } from '../src/services/workspace.js';
-import { createRankedIssue } from './helpers/factories.js';
+import { createMemory, createRankedIssue } from './helpers/factories.js';
 
 const tempDirs: string[] = [];
 
@@ -118,6 +118,73 @@ describe('workspaceService.applyGeneratedChanges', () => {
 });
 
 describe('workspaceService.detectTestCommands', () => {
+  test('prepares repository workspace without a real issue target', async () => {
+    const tempRoot = makeWorkspace();
+    const openMetaHome = join(tempRoot, 'openmeta-home');
+    const remotePath = join(tempRoot, 'remote.git');
+    const seedPath = join(tempRoot, 'seed');
+    process.env['OPENMETA_HOME'] = openMetaHome;
+
+    mkdirSync(seedPath, { recursive: true });
+    const seedGit = simpleGit(seedPath);
+    await seedGit.init(['--initial-branch=main']);
+    await seedGit.addConfig('user.name', 'OpenMeta Test');
+    await seedGit.addConfig('user.email', 'openmeta@example.com');
+    mkdirSync(join(seedPath, 'src'), { recursive: true });
+    writeFileSync(join(seedPath, 'README.md'), '# Demo\n\nMissing setup notes.\n', 'utf-8');
+    writeFileSync(join(seedPath, 'package.json'), JSON.stringify({
+      scripts: {
+        test: 'bun test',
+      },
+    }), 'utf-8');
+    writeFileSync(join(seedPath, 'src', 'index.ts'), 'export const demo = true;\n', 'utf-8');
+    await seedGit.add('.');
+    await seedGit.commit('chore: seed repo');
+    await simpleGit().clone(seedPath, remotePath, ['--bare']);
+
+    const service = workspaceService as unknown as {
+      buildRepoUrl(repoFullName: string): string;
+      prepareRepositoryWorkspace(
+        repoFullName: string,
+        memory: ReturnType<typeof createMemory>,
+        runChecks: boolean,
+        executionMode?: 'interactive' | 'headless',
+      ): Promise<{
+        workspacePath: string;
+        defaultBranch: string;
+        branchName?: string;
+        topLevelFiles: string[];
+        candidateFiles: string[];
+        snippets: Array<{ path: string; content: string }>;
+        testCommands: Array<{ command: string }>;
+      }>;
+    };
+    const originalBuildRepoUrl = service.buildRepoUrl;
+    service.buildRepoUrl = () => remotePath;
+
+    try {
+      const workspace = await service.prepareRepositoryWorkspace(
+        'acme/demo',
+        createMemory({
+          repoFullName: 'acme/demo',
+          preferredPaths: ['src/index.ts'],
+        }),
+        false,
+      );
+
+      expect(workspace.defaultBranch).toBe('main');
+      expect(workspace.branchName).toMatch(/^openmeta\/analyze-acme-demo/);
+      expect(workspace.topLevelFiles).toContain('README.md');
+      expect(workspace.candidateFiles).toContain('README.md');
+      expect(workspace.candidateFiles).toContain('src/index.ts');
+      expect(workspace.snippets.some((snippet) => snippet.path === 'README.md')).toBe(true);
+      expect(workspace.testCommands.map((command) => command.command)).toContain('bun run test');
+    } finally {
+      service.buildRepoUrl = originalBuildRepoUrl;
+      delete process.env['OPENMETA_HOME'];
+    }
+  });
+
   test('prefers bun for package scripts when a bun lockfile is present', () => {
     const workspacePath = makeWorkspace();
     writeFileSync(join(workspacePath, 'package.json'), JSON.stringify({
@@ -261,5 +328,30 @@ describe('workspaceService.detectTestCommands', () => {
     }, ['src/utils/labels.ts', 'src/components/IconButton.tsx']);
 
     expect(rankedFiles[0]).toBe('src/components/IconButton.tsx');
+  });
+
+  test('prioritizes repository analysis paths with docs, config, source, tests, and memory signals', () => {
+    const rankedFiles = (workspaceService as unknown as {
+      rankRepositoryAnalysisFiles: (
+        memory: ReturnType<typeof createMemory>,
+        files: string[],
+      ) => string[];
+    }).rankRepositoryAnalysisFiles(createMemory({
+      preferredPaths: ['src/components/IconButton.tsx'],
+    }), [
+      'docs/internal/archive.txt',
+      'README.md',
+      'package.json',
+      'src/components/IconButton.tsx',
+      'test/icon-button.test.ts',
+      'assets/logo.png',
+    ]);
+
+    expect(rankedFiles.slice(0, 4)).toEqual([
+      'src/components/IconButton.tsx',
+      'README.md',
+      'package.json',
+      'test/icon-button.test.ts',
+    ]);
   });
 });

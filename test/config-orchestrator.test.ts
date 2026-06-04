@@ -46,4 +46,31 @@ describe('ConfigOrchestrator', () => {
     expect(loaded.github.pat).toBe('ghp_new_secret');
     expect(loaded.llm.apiKey).toBe('sk-new-secret');
   });
+
+  test('sets and validates LLM reasoning effort from dotted config keys', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('llm.reasoningEffort', 'high');
+
+    const loaded = await configService.get();
+    expect(loaded.llm.reasoningEffort).toBe('high');
+
+    await expect(orchestrator.set('llm.reasoningEffort', 'unsupported')).rejects.toThrow(
+      'llm.reasoningEffort must be',
+    );
+  });
+
+  test('sets and validates LLM streaming from dotted config keys', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('llm.stream', 'true');
+    expect((await configService.get()).llm.stream).toBe(true);
+
+    await orchestrator.set('llm.stream', 'false');
+    expect((await configService.get()).llm.stream).toBe(false);
+
+    await expect(orchestrator.set('llm.stream', 'maybe')).rejects.toThrow(
+      'llm.stream must be a boolean value.',
+    );
+  });
 });

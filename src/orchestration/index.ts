@@ -1,5 +1,6 @@
 export { dailyOrchestrator, DailyOrchestrator } from './daily.js';
 export { agentOrchestrator, AgentOrchestrator } from './agent.js';
+export { analyzeOrchestrator, AnalyzeOrchestrator } from './analyze.js';
 export { initOrchestrator, InitOrchestrator } from './init.js';
 export { configOrchestrator, ConfigOrchestrator } from './config.js';
 export { providerOrchestrator, ProviderOrchestrator } from './provider.js';

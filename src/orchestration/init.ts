@@ -9,8 +9,9 @@ import {
   findLLMProviderPreset,
   type SchedulerSyncResult,
 } from '../services/index.js';
-import { configService, prompt, selectPrompt, ui } from '../infra/index.js';
+import { configService, DEFAULT_LLM_REASONING_EFFORT, LLM_REASONING_EFFORTS, prompt, selectPrompt, ui } from '../infra/index.js';
 import type { ContentType } from '../types/content.types.js';
+import type { LLMReasoningEffort } from '../types/index.js';
 
 const TECH_STACK_CHOICES = [
   'TypeScript',
@@ -186,16 +187,20 @@ export class InitOrchestrator {
     let apiBaseUrl = config.llm.apiBaseUrl;
     let apiHeaders: Record<string, string> = config.llm.apiHeaders ?? {};
     let apiKey = config.llm.apiKey;
+    let reasoningEffort = config.llm.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT;
+    let stream = config.llm.stream === true;
 
     await stepOrSkip(
       'llm',
       !!(apiKey && apiBaseUrl && modelValue),
       'LLM provider is already configured.',
       () => {
-        llmService.initialize(apiKey, apiBaseUrl, modelValue, apiHeaders, providerValue);
+        llmService.initialize(apiKey, apiBaseUrl, modelValue, apiHeaders, providerValue, reasoningEffort, stream);
         ui.keyValues('LLM provider connected', [
           { label: 'Provider', value: selectedProvider?.name ?? providerValue, tone: 'success' },
           { label: 'Model', value: modelValue, tone: 'success' },
+          { label: 'Reasoning effort', value: reasoningEffort, tone: 'info' },
+          { label: 'Streaming', value: stream ? 'yes' : 'no', tone: stream ? 'info' : 'muted' },
           { label: 'Endpoint', value: apiBaseUrl, tone: 'info' },
           { label: 'Extra headers', value: Object.keys(apiHeaders).length > 0 ? JSON.stringify(apiHeaders) : '(none)', tone: 'info' },
           { label: 'API key', value: ui.maskSecret(apiKey), tone: 'success' },
@@ -231,9 +236,11 @@ export class InitOrchestrator {
               choices: selectedProvider.models.map((model) => ({ name: model.name, value: model.value })),
             });
 
+          reasoningEffort = await this.promptReasoningEffort(config.llm.reasoningEffort);
+          stream = await this.promptLlmStreaming(config.llm.stream);
           apiKey = await this.promptAPIKey();
 
-          llmService.initialize(apiKey, apiBaseUrl, modelValue, apiHeaders, selectedProvider.value as AppConfig['llm']['provider']);
+          llmService.initialize(apiKey, apiBaseUrl, modelValue, apiHeaders, selectedProvider.value as AppConfig['llm']['provider'], reasoningEffort, stream);
           llmValid = await this.validateLlmConnection();
 
           if (!llmValid) {
@@ -260,10 +267,12 @@ export class InitOrchestrator {
           }
         }
         completedSteps.add('llm');
-        await commit({ llm: { provider: providerValue as AppConfig['llm']['provider'], apiBaseUrl, apiKey, modelName: modelValue, apiHeaders } });
+        await commit({ llm: { provider: providerValue as AppConfig['llm']['provider'], apiBaseUrl, apiKey, modelName: modelValue, apiHeaders, reasoningEffort, stream } });
         ui.keyValues('LLM provider connected', [
           { label: 'Provider', value: selectedProvider!.name, tone: 'success' },
           { label: 'Model', value: modelValue, tone: 'success' },
+          { label: 'Reasoning effort', value: reasoningEffort, tone: 'info' },
+          { label: 'Streaming', value: stream ? 'yes' : 'no', tone: stream ? 'info' : 'muted' },
           { label: 'Endpoint', value: apiBaseUrl, tone: 'info' },
           { label: 'Extra headers', value: Object.keys(apiHeaders).length > 0 ? JSON.stringify(apiHeaders) : '(none)', tone: 'info' },
           { label: 'API key', value: ui.maskSecret(apiKey), tone: 'success' },
@@ -432,6 +441,8 @@ export class InitOrchestrator {
     ui.stats('Setup summary', [
       { label: 'GitHub', value: username, tone: 'success' },
       { label: 'Model', value: modelValue, hint: selectedProvider?.name, tone: 'success' },
+      { label: 'Reasoning', value: reasoningEffort, tone: 'info' },
+      { label: 'Streaming', value: stream ? 'YES' : 'NO', tone: stream ? 'info' : 'muted' },
       { label: 'Repo policy', value: targetRepoPath ? 'CUSTOM' : 'MANAGED', tone: 'accent' },
       { label: 'Automation', value: automationEnabled ? 'ENABLED' : 'MANUAL', tone: automationEnabled ? 'warning' : 'muted' },
     ]);
@@ -498,6 +509,30 @@ export class InitOrchestrator {
     ]);
 
     return modelName.trim();
+  }
+
+  private async promptReasoningEffort(defaultValue?: AppConfig['llm']['reasoningEffort']): Promise<LLMReasoningEffort> {
+    return selectPrompt<LLMReasoningEffort>({
+      message: 'Select reasoning effort:',
+      default: defaultValue || DEFAULT_LLM_REASONING_EFFORT,
+      choices: LLM_REASONING_EFFORTS.map((effort) => ({
+        name: effort,
+        value: effort,
+      })),
+    });
+  }
+
+  private async promptLlmStreaming(defaultValue?: boolean): Promise<boolean> {
+    const { stream } = await prompt<{ stream: boolean }>([
+      {
+        type: 'confirm',
+        name: 'stream',
+        message: 'Use streaming LLM responses?',
+        default: defaultValue === true,
+      },
+    ]);
+
+    return stream;
   }
 
   private async promptUsername(): Promise<string> {

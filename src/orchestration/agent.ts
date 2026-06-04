@@ -19,6 +19,8 @@ import {
   getOpenMetaArtifactRoot,
   isUserCancelledError,
   logger,
+  parseGitHubRepoFullName,
+  resolveGitHubIssueTarget,
   prompt,
   selectPrompt,
   ui,
@@ -43,12 +45,15 @@ export interface AgentRunOptions {
   runChecks?: boolean;
   draftOnly?: boolean;
   refresh?: boolean;
+  repo?: string;
+  issue?: string;
   dryRun?: boolean;
 }
 
 export interface ScoutRunOptions {
   limit?: number;
   refresh?: boolean;
+  repo?: string;
   localOnly?: boolean;
 }
 
@@ -124,6 +129,8 @@ export class AgentOrchestrator {
     const runChecks = typeof options.runChecks === 'boolean' ? options.runChecks : !headless;
     const draftOnly = Boolean(options.draftOnly);
     const refresh = Boolean(options.refresh);
+    const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
+    const repoFullName = issueTarget?.repoFullName ?? (options.repo ? parseGitHubRepoFullName(options.repo) : undefined);
     const completedStages = new Set<AgentStageId>();
 
     ui.hero({
@@ -135,7 +142,16 @@ export class AgentOrchestrator {
       lines: [
         runChecks ? 'Baseline checks will fire wherever the repository exposes a safe command path.' : 'This pass will stay light and skip baseline checks.',
         draftOnly ? 'Draft-only mode will preserve artifacts without applying generated file edits or opening a PR.' : 'Generated patches can be applied after repository safety checks pass.',
-        refresh ? 'Issue discovery will bypass the local search cache for this run.' : 'Issue discovery may reuse the short local search cache.',
+        issueTarget
+          ? `Target issue is locked to ${issueTarget.repoFullName}#${issueTarget.issueNumber}.`
+          : refresh
+            ? 'Issue discovery will bypass the local search cache for this run.'
+            : 'Issue discovery may reuse the short local search cache.',
+        issueTarget
+          ? 'Issue discovery and interactive selection are skipped for this run.'
+          : repoFullName
+            ? `Issue discovery is limited to ${repoFullName}.`
+            : 'Issue discovery will scan the broader GitHub issue stream.',
         headless ? `Unattended selection honors the saved threshold at ${config.automation.minMatchScore}/100.` : 'You stay in control at each decision gate before anything is published.',
       ],
     });
@@ -146,39 +162,54 @@ export class AgentOrchestrator {
       await this.confirmManualHeadlessRun(config);
     }
 
-    this.renderAgentStage('scout', completedStages, 'Verifying provider access and loading ranked opportunities.');
+    this.renderAgentStage('scout', completedStages, issueTarget
+      ? `Verifying provider access and loading ${issueTarget.repoFullName}#${issueTarget.issueNumber}.`
+      : 'Verifying provider access and loading ranked opportunities.');
     await this.initializeClients(config);
 
     const rankedIssues = await ui.task({
-      title: 'Ranking contribution opportunities',
+      title: issueTarget ? 'Loading target issue' : 'Ranking contribution opportunities',
       doneMessage: 'Opportunity ranking complete',
       failedMessage: 'Opportunity ranking failed',
       tone: 'info',
-    }, async (task) => issueRankingService.loadRankedIssues(config, {
-      refresh,
-      onStatus: (message) => task.setMessage(message),
-    }));
+    }, async (task) => issueTarget
+      ? issueRankingService.loadTargetIssue(config, issueTarget)
+      : issueRankingService.loadRankedIssues(config, {
+        refresh,
+        repoFullName,
+        onStatus: (message) => task.setMessage(message),
+      }));
     if (rankedIssues.length === 0) {
       ui.emptyState(
         'OpenMeta Agent',
-        'No viable issues found',
-        'No issues met the current technical match threshold. Broaden your profile or try again later.',
+        issueTarget ? 'Target issue could not be ranked' : 'No viable issues found',
+        issueTarget
+          ? 'OpenMeta could not build a contribution target from the specified issue.'
+          : 'No issues met the current technical match threshold. Broaden your profile or try again later.',
       );
       return;
     }
     completedStages.add('scout');
 
-    this.renderAgentStage('select', completedStages, 'Review the top ranked issues and choose the next contribution target.');
-    this.renderOpportunityList('Top ranked opportunities', rankedIssues.slice(0, 5));
-    const selectedIssue = headless
-      ? issueRankingService.selectIssueForAutomation(rankedIssues, config.automation.minMatchScore)
-      : await this.promptForIssue(rankedIssues);
+    this.renderAgentStage('select', completedStages, issueTarget
+      ? 'Using the explicitly targeted issue as the contribution target.'
+      : 'Review the top ranked issues and choose the next contribution target.');
+    if (!issueTarget) {
+      this.renderOpportunityList('Top ranked opportunities', rankedIssues.slice(0, 5));
+    }
+    const selectedIssue = issueTarget
+      ? rankedIssues[0]
+      : headless
+        ? issueRankingService.selectIssueForAutomation(rankedIssues, config.automation.minMatchScore)
+        : await this.promptForIssue(rankedIssues);
 
     if (!selectedIssue) {
       ui.emptyState(
         'OpenMeta Agent',
-        'No issue met the automation threshold',
-        `Top opportunities were below ${config.automation.minMatchScore}/100. Lower the threshold or widen your profile.`,
+        issueTarget ? 'Target issue could not be selected' : 'No issue met the automation threshold',
+        issueTarget
+          ? 'OpenMeta could not select the specified target issue after scoring.'
+          : `Top opportunities were below ${config.automation.minMatchScore}/100. Lower the threshold or widen your profile.`,
       );
       return;
     }
@@ -397,6 +428,7 @@ export class AgentOrchestrator {
   async scout(options: ScoutRunOptions | number = {}): Promise<void> {
     const limit = typeof options === 'number' ? options : options.limit ?? 10;
     const refresh = typeof options === 'number' ? false : Boolean(options.refresh);
+    const repoFullName = typeof options === 'number' || !options.repo ? undefined : parseGitHubRepoFullName(options.repo);
     const localOnly = typeof options === 'number' ? false : Boolean(options.localOnly);
     const config = await configService.get();
     await this.validateConfig(config, { requireLlm: !localOnly });
@@ -411,6 +443,7 @@ export class AgentOrchestrator {
       lines: [
         `Saved threshold reference: ${config.automation.minMatchScore}/100.`,
         refresh ? 'This scout run will ignore the local GitHub issue cache.' : 'This scout run may reuse the short local GitHub issue cache.',
+        repoFullName ? `Issue discovery is limited to ${repoFullName}.` : 'Issue discovery will scan the broader GitHub issue stream.',
         localOnly ? 'LLM validation and model scoring are skipped for this run.' : 'LLM scoring will refine the local candidate shortlist.',
       ],
     });
@@ -422,6 +455,7 @@ export class AgentOrchestrator {
       tone: 'info',
     }, async (task) => issueRankingService.loadRankedIssues(config, {
       refresh,
+      repoFullName,
       localOnly,
       onStatus: (message) => task.setMessage(message),
     }));
@@ -766,7 +800,15 @@ export class AgentOrchestrator {
       return;
     }
 
-    llmService.initialize(config.llm.apiKey, config.llm.apiBaseUrl, config.llm.modelName, config.llm.apiHeaders, config.llm.provider);
+    llmService.initialize(
+      config.llm.apiKey,
+      config.llm.apiBaseUrl,
+      config.llm.modelName,
+      config.llm.apiHeaders,
+      config.llm.provider,
+      config.llm.reasoningEffort,
+      config.llm.stream === true,
+    );
     const llmValid = await ui.task({
       title: 'Validating LLM provider',
       doneMessage: 'LLM provider verified',
@@ -1593,13 +1635,13 @@ export class AgentOrchestrator {
       const git = simpleGit(config.github.targetRepoPath);
       const remoteUrl = await this.getOriginRemoteUrl(git);
       const parsedRepo = this.parseGitHubRepository(remoteUrl);
-      const repoInfo = await this.getGitHubRepositoryInfo(parsedRepo.owner, parsedRepo.repo);
+      const defaultBranch = await this.resolveConfiguredTargetDefaultBranch(git, parsedRepo.owner, parsedRepo.repo);
 
       return {
         path: config.github.targetRepoPath,
         owner: parsedRepo.owner,
         repo: parsedRepo.repo,
-        defaultBranch: repoInfo.default_branch || 'main',
+        defaultBranch,
       };
     }
 
@@ -1723,6 +1765,36 @@ export class AgentOrchestrator {
 
     const { data } = await this.octokit.rest.repos.get({ owner, repo });
     return data;
+  }
+
+  private async resolveConfiguredTargetDefaultBranch(git: SimpleGit, owner: string, repo: string): Promise<string> {
+    try {
+      const repoInfo = await this.getGitHubRepositoryInfo(owner, repo);
+      return repoInfo.default_branch || 'main';
+    } catch (error) {
+      logger.warn(`Unable to read GitHub metadata for ${owner}/${repo}. Falling back to the local target repository branch.`, error);
+      return this.detectLocalDefaultBranch(git);
+    }
+  }
+
+  private async detectLocalDefaultBranch(git: SimpleGit): Promise<string> {
+    try {
+      const branchReference = await git.raw(['symbolic-ref', 'refs/remotes/origin/HEAD']);
+      const segments = branchReference.trim().split('/');
+      return segments.at(-1) || 'main';
+    } catch {
+      const branches = await git.branch();
+
+      if (branches.all.includes('main')) {
+        return 'main';
+      }
+
+      if (branches.all.includes('master')) {
+        return 'master';
+      }
+
+      return branches.current || 'main';
+    }
   }
 
   private showStructuredReviewNotice(input: {

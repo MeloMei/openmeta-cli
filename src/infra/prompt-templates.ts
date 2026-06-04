@@ -320,6 +320,95 @@ Validation Context:
 {{validationContext}}
 `;
 
+export const REPOSITORY_ANALYSIS_PROMPT = `You are OpenMeta, an autonomous open source contribution agent.
+
+Analyze the repository context and propose concrete contribution opportunities that could become useful pull requests even when no GitHub issue exists.
+
+Requirements:
+1. Return one valid JSON object only. No markdown. No commentary.
+2. Generate 3-5 suggestions when enough context exists.
+3. Suggestions must be small enough for a focused pull request.
+4. Prefer improvements grounded in the provided files, tests, README, config, or repo memory.
+5. Do not invent files that are not implied by the repository context.
+6. Rank each suggestion by practical PR potential from 0-100.
+7. Use stable lowercase kebab-case ids.
+
+Output schema:
+{
+  "version": "1",
+  "kind": "repository_suggestion_list",
+  "status": "success",
+  "data": {
+    "suggestions": [
+      {
+        "id": "docs-install",
+        "title": "short contribution title",
+        "summary": "one sentence",
+        "rationale": "why this matters for the project",
+        "targetFiles": [
+          {
+            "path": "relative/path",
+            "reason": "why this file matters"
+          }
+        ],
+        "proposedChanges": ["specific change"],
+        "validationPlan": ["concrete validation step"],
+        "risks": ["honest risk"],
+        "estimatedWorkload": "small",
+        "prPotentialScore": 84
+      }
+    ]
+  }
+}
+
+Repository Context:
+{{repoContext}}
+
+Repo Memory:
+{{repoMemory}}
+`;
+
+export const REPOSITORY_ANALYSIS_REPAIR_PROMPT = `You are OpenMeta, an autonomous open source contribution agent.
+
+The previous repository analysis response was not parseable or did not match the required schema. Reformat it into strict JSON.
+
+Required schema:
+{
+  "version": "1",
+  "kind": "repository_suggestion_list",
+  "status": "success" | "needs_review",
+  "data": {
+    "suggestions": [
+      {
+        "id": "stable-kebab-case-id",
+        "title": "short contribution title",
+        "summary": "one sentence",
+        "rationale": "why this matters for the project",
+        "targetFiles": [
+          {
+            "path": "relative/path",
+            "reason": "why this file matters"
+          }
+        ],
+        "proposedChanges": ["specific change"],
+        "validationPlan": ["concrete validation step"],
+        "risks": ["honest risk"],
+        "estimatedWorkload": "small" | "medium" | "large",
+        "prPotentialScore": 84
+      }
+    ]
+  }
+}
+
+Rules:
+1. Return only one valid JSON object. No commentary.
+2. Keep only concrete, repository-grounded suggestions.
+3. If the previous response is unusable, return {"version":"1","kind":"repository_suggestion_list","status":"needs_review","data":{"suggestions":[]}}.
+
+Previous response:
+{{invalidResponse}}
+`;
+
 export function fillPrompt(template: string, data: Record<string, string>): string {
   let result = template;
   for (const [key, value] of Object.entries(data)) {

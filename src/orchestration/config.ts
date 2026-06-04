@@ -1,4 +1,4 @@
-import { configService, prompt, ui } from '../infra/index.js';
+import { configService, parseLLMReasoningEffort, prompt, ui } from '../infra/index.js';
 import { schedulerService } from '../services/index.js';
 import type { AppConfig } from '../types/index.js';
 
@@ -62,6 +62,8 @@ export class ConfigOrchestrator {
       { label: 'Provider', value: config.llm.provider || '(not set)', tone: config.llm.provider ? 'info' : 'warning' },
       { label: 'Base URL', value: config.llm.apiBaseUrl || '(not set)', tone: config.llm.apiBaseUrl ? 'info' : 'warning' },
       { label: 'Model', value: config.llm.modelName || '(not set)', tone: config.llm.modelName ? 'info' : 'warning' },
+      { label: 'Reasoning effort', value: config.llm.reasoningEffort || 'none', tone: 'info' },
+      { label: 'Streaming', value: config.llm.stream ? 'yes' : 'no', tone: config.llm.stream ? 'info' : 'muted' },
       { label: 'Extra headers', value: Object.keys(config.llm.apiHeaders || {}).length > 0 ? JSON.stringify(config.llm.apiHeaders) : '(none)', tone: 'info' },
       { label: 'API key', value: ui.maskSecret(config.llm.apiKey), tone: config.llm.apiKey ? 'info' : 'warning' },
       { label: 'Saved profiles', value: String(Object.keys(config.llm.profiles || {}).length), tone: Object.keys(config.llm.profiles || {}).length > 0 ? 'info' : 'muted' },
@@ -97,7 +99,7 @@ export class ConfigOrchestrator {
   async set(key: string, value: string): Promise<void> {
     const config = await configService.get();
     const validPaths = ['userProfile.techStack', 'userProfile.proficiency', 'userProfile.focusAreas',
-                       'github.username', 'github.pat', 'github.targetRepoPath', 'llm.provider', 'llm.apiBaseUrl', 'llm.apiKey', 'llm.modelName',
+                       'github.username', 'github.pat', 'github.targetRepoPath', 'llm.provider', 'llm.apiBaseUrl', 'llm.apiKey', 'llm.modelName', 'llm.reasoningEffort', 'llm.stream',
                        'automation.enabled', 'automation.scheduleTime', 'automation.contentType',
                        'automation.minMatchScore', 'automation.skipIfAlreadyGeneratedToday',
                        'commitTemplate'];
@@ -144,6 +146,10 @@ export class ConfigOrchestrator {
       updated = await configService.update({ llm: { ...config.llm, apiKey: this.parseRequiredSecret(value, key) } });
     } else if (key === 'llm.modelName') {
       updated = await configService.update({ llm: { ...config.llm, modelName: value } });
+    } else if (key === 'llm.reasoningEffort') {
+      updated = await configService.update({ llm: { ...config.llm, reasoningEffort: parseLLMReasoningEffort(value) } });
+    } else if (key === 'llm.stream') {
+      updated = await configService.update({ llm: { ...config.llm, stream: this.parseBoolean(value, key) } });
     } else if (key === 'automation.enabled') {
       updated = await configService.update({
         automation: {
@@ -302,6 +308,10 @@ export class ConfigOrchestrator {
         return ui.maskSecret(config.llm.apiKey);
       case 'llm.modelName':
         return config.llm.modelName;
+      case 'llm.reasoningEffort':
+        return config.llm.reasoningEffort || 'none';
+      case 'llm.stream':
+        return config.llm.stream ? 'yes' : 'no';
       case 'automation.enabled':
         return config.automation.enabled ? 'yes' : 'no';
       case 'automation.scheduleTime':

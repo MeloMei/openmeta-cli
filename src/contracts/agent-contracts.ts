@@ -89,10 +89,39 @@ export const PullRequestDraftSchema = z.object({
   risks: z.array(nonEmptyTrimmedString).default([]),
 });
 
+export const RepositoryImprovementSuggestionSchema = z.object({
+  id: nonEmptyTrimmedString,
+  title: nonEmptyTrimmedString,
+  summary: nonEmptyTrimmedString,
+  rationale: nonEmptyTrimmedString,
+  targetFiles: z.array(PatchTargetFileSchema).min(1).max(8),
+  proposedChanges: z.array(nonEmptyTrimmedString).min(1).max(8),
+  validationPlan: z.array(nonEmptyTrimmedString).default([]),
+  risks: z.array(nonEmptyTrimmedString).default([]),
+  estimatedWorkload: z.enum(['small', 'medium', 'large']),
+  prPotentialScore: z.coerce.number().int().min(0).max(100),
+});
+
+export const RepositorySuggestionListSchema = z.object({
+  suggestions: z.array(RepositoryImprovementSuggestionSchema).default([]).transform((suggestions) => {
+    const dedupedSuggestions = new Map<string, RepositoryImprovementSuggestion>();
+
+    for (const suggestion of suggestions) {
+      const existing = dedupedSuggestions.get(suggestion.id);
+      if (!existing || suggestion.prPotentialScore >= existing.prPotentialScore) {
+        dedupedSuggestions.set(suggestion.id, suggestion);
+      }
+    }
+
+    return [...dedupedSuggestions.values()].sort((left, right) => right.prPotentialScore - left.prPotentialScore);
+  }),
+});
+
 export const IssueMatchListEnvelopeSchema = createStructuredOutputEnvelopeSchema('issue_match_list', IssueMatchListSchema);
 export const PatchDraftEnvelopeSchema = createStructuredOutputEnvelopeSchema('patch_draft', PatchDraftSchema);
 export const ImplementationDraftEnvelopeSchema = createStructuredOutputEnvelopeSchema('implementation_draft', ImplementationDraftSchema);
 export const PullRequestDraftEnvelopeSchema = createStructuredOutputEnvelopeSchema('pull_request_draft', PullRequestDraftSchema);
+export const RepositorySuggestionListEnvelopeSchema = createStructuredOutputEnvelopeSchema('repository_suggestion_list', RepositorySuggestionListSchema);
 
 export type IssueMatch = z.infer<typeof IssueMatchSchema>;
 export type IssueMatchList = z.infer<typeof IssueMatchListSchema>;
@@ -102,6 +131,8 @@ export type PatchDraft = z.infer<typeof PatchDraftSchema>;
 export type GeneratedFileChange = z.infer<typeof GeneratedFileChangeSchema>;
 export type ImplementationDraft = z.infer<typeof ImplementationDraftSchema>;
 export type PullRequestDraft = z.infer<typeof PullRequestDraftSchema>;
+export type RepositoryImprovementSuggestion = z.infer<typeof RepositoryImprovementSuggestionSchema>;
+export type RepositorySuggestionList = z.infer<typeof RepositorySuggestionListSchema>;
 export type StructuredOutputStatus = z.infer<typeof StructuredOutputStatusSchema>;
 export interface StructuredOutputResult<TKind extends string, TData> {
   version: '1';
@@ -113,3 +144,4 @@ export type IssueMatchListEnvelope = z.infer<typeof IssueMatchListEnvelopeSchema
 export type PatchDraftEnvelope = z.infer<typeof PatchDraftEnvelopeSchema>;
 export type ImplementationDraftEnvelope = z.infer<typeof ImplementationDraftEnvelopeSchema>;
 export type PullRequestDraftEnvelope = z.infer<typeof PullRequestDraftEnvelopeSchema>;
+export type RepositorySuggestionListEnvelope = z.infer<typeof RepositorySuggestionListEnvelopeSchema>;

@@ -55,57 +55,54 @@ export class WorkspaceService {
     executionMode: ExecutionMode = 'interactive',
   ): Promise<RepoWorkspaceContext> {
     const workspacePath = this.getWorkspacePath(issue.repoFullName);
-    const repoUrl = `https://github.com/${issue.repoFullName}.git`;
-
-    if (!existsSync(workspacePath)) {
-      mkdirSync(dirname(workspacePath), { recursive: true });
-      await simpleGit().clone(repoUrl, workspacePath);
-    }
-
-    const git = simpleGit(workspacePath);
-    await git.fetch('origin');
-
-    const defaultBranch = await this.detectDefaultBranch(git);
-    const status = await git.status();
-    const workspaceDirty = status.files.length > 0;
-    const branchName = workspaceDirty ? undefined : await this.createWorkspaceBranchName(git, issue);
-
-    if (!workspaceDirty && branchName) {
-      await git.checkout(defaultBranch);
-      try {
-        await git.pull('origin', defaultBranch);
-      } catch (error) {
-        logger.debug('Unable to fast-forward workspace before branch creation', error);
-      }
-
-      await git.checkoutLocalBranch(branchName);
-    }
-
-    const topLevelFiles = readdirSync(workspacePath).slice(0, 50);
-    const discoveredFiles = this.discoverFiles(workspacePath);
-    const candidateFiles = this.rankCandidateFiles(issue, memory, discoveredFiles).slice(0, 8);
-    const snippets = candidateFiles.map((path) => ({
-      path,
-      content: this.readSnippet(join(workspacePath, path)),
-    }));
-    const testCommands = this.detectTestCommands(workspacePath);
-    const { commands: validationCommands, warnings: validationWarnings } =
-      this.selectValidationCommands(testCommands, executionMode);
-    const testResults = runChecks ? this.runTestCommands(workspacePath, validationCommands.slice(0, 3)) : [];
-
-    return {
+    const workspaceState = await this.prepareGitWorkspace(
+      issue.repoFullName,
       workspacePath,
-      workspaceDirty,
-      defaultBranch,
-      branchName,
-      topLevelFiles,
+      (git) => this.createWorkspaceBranchName(git, issue),
+    );
+    const candidateFiles = this.rankCandidateFiles(
+      issue,
+      memory,
+      this.discoverFiles(workspacePath),
+    ).slice(0, 8);
+
+    return this.buildWorkspaceContext({
+      workspacePath,
+      workspaceDirty: workspaceState.workspaceDirty,
+      defaultBranch: workspaceState.defaultBranch,
+      branchName: workspaceState.branchName,
       candidateFiles,
-      snippets,
-      testCommands,
-      validationCommands,
-      validationWarnings,
-      testResults,
-    };
+      runChecks,
+      executionMode,
+    });
+  }
+
+  async prepareRepositoryWorkspace(
+    repoFullName: string,
+    memory: RepoMemory,
+    runChecks: boolean,
+    executionMode: ExecutionMode = 'interactive',
+  ): Promise<RepoWorkspaceContext> {
+    const workspacePath = this.getWorkspacePath(repoFullName);
+    const workspaceState = await this.prepareGitWorkspace(
+      repoFullName,
+      workspacePath,
+      (git) => this.createRepositoryAnalysisBranchName(git, repoFullName),
+    );
+    const candidateFiles = this.rankRepositoryAnalysisFiles(
+      memory,
+      this.discoverFiles(workspacePath),
+    ).slice(0, 12);
+
+    return this.buildWorkspaceContext({
+      workspacePath,
+      candidateFiles,
+      workspaceDirty: workspaceState.workspaceDirty,
+      defaultBranch: workspaceState.defaultBranch,
+      branchName: workspaceState.branchName,
+      runChecks,
+      executionMode,
+    });
   }
 
   applyGeneratedChanges(
@@ -225,8 +222,94 @@ export class WorkspaceService {
     }
   }
 
+  private buildRepoUrl(repoFullName: string): string {
+    return `https://github.com/${repoFullName}.git`;
+  }
+
+  private async prepareGitWorkspace(
+    repoFullName: string,
+    workspacePath: string,
+    createBranchName: (git: SimpleGit) => Promise<string>,
+  ): Promise<{ defaultBranch: string; workspaceDirty: boolean; branchName?: string }> {
+    const repoUrl = this.buildRepoUrl(repoFullName);
+
+    if (!existsSync(workspacePath)) {
+      mkdirSync(dirname(workspacePath), { recursive: true });
+      await simpleGit().clone(repoUrl, workspacePath);
+    }
+
+    const git = simpleGit(workspacePath);
+    await git.fetch('origin');
+
+    const defaultBranch = await this.detectDefaultBranch(git);
+    const status = await git.status();
+    const workspaceDirty = status.files.length > 0;
+    const branchName = workspaceDirty ? undefined : await createBranchName(git);
+
+    if (!workspaceDirty && branchName) {
+      await git.checkout(defaultBranch);
+      try {
+        await git.pull('origin', defaultBranch);
+      } catch (error) {
+        logger.debug('Unable to fast-forward workspace before branch creation', error);
+      }
+
+      await git.checkoutLocalBranch(branchName);
+    }
+
+    return {
+      defaultBranch,
+      workspaceDirty,
+      branchName,
+    };
+  }
+
+  private buildWorkspaceContext(input: {
+    workspacePath: string;
+    workspaceDirty: boolean;
+    defaultBranch: string;
+    branchName?: string;
+    candidateFiles: string[];
+    runChecks: boolean;
+    executionMode: ExecutionMode;
+  }): RepoWorkspaceContext {
+    const topLevelFiles = readdirSync(input.workspacePath).slice(0, 50);
+    const snippets = input.candidateFiles.map((path) => ({
+      path,
+      content: this.readSnippet(join(input.workspacePath, path)),
+    }));
+    const testCommands = this.detectTestCommands(input.workspacePath);
+    const { commands: validationCommands, warnings: validationWarnings } =
+      this.selectValidationCommands(testCommands, input.executionMode);
+    const testResults = input.runChecks ? this.runTestCommands(input.workspacePath, validationCommands.slice(0, 3)) : [];
+
+    return {
+      workspacePath: input.workspacePath,
+      workspaceDirty: input.workspaceDirty,
+      defaultBranch: input.defaultBranch,
+      branchName: input.branchName,
+      topLevelFiles,
+      candidateFiles: input.candidateFiles,
+      snippets,
+      testCommands,
+      validationCommands,
+      validationWarnings,
+      testResults,
+    };
+  }
+
   private async createWorkspaceBranchName(git: SimpleGit, issue: RankedIssue): Promise<string> {
     const baseBranchName = `openmeta/${issue.number}-${slugify(issue.title) || 'issue'}`;
+    const localBranches = await git.branchLocal();
+    if (!localBranches.all.includes(baseBranchName)) {
+      return baseBranchName;
+    }
+
+    return `${baseBranchName}-${Date.now()}`;
+  }
+
+  private async createRepositoryAnalysisBranchName(git: SimpleGit, repoFullName: string): Promise<string> {
+    const baseBranchName = `openmeta/analyze-${slugify(repoFullName.replace(/\//g, '-')) || 'repo'}`;
     const localBranches = await git.branchLocal();
     if (!localBranches.all.includes(baseBranchName)) {
       return baseBranchName;
@@ -276,6 +359,64 @@ export class WorkspaceService {
 
     return [...files]
       .sort((left, right) => this.scorePath(right, keywords, memory, referencedPaths) - this.scorePath(left, keywords, memory, referencedPaths));
+  }
+
+  private rankRepositoryAnalysisFiles(memory: RepoMemory, files: string[]): string[] {
+    return [...files]
+      .sort((left, right) => this.scoreRepositoryAnalysisPath(right, memory) - this.scoreRepositoryAnalysisPath(left, memory));
+  }
+
+  private scoreRepositoryAnalysisPath(path: string, memory: RepoMemory): number {
+    let score = 0;
+    const lowerPath = path.toLowerCase();
+    const fileName = basename(lowerPath);
+    const pathSignal = (memory.pathSignals ?? []).find((signal) => signal.path === path);
+    const recentIssue = (memory.recentIssues ?? []).find((issue) => issue.changedFiles.includes(path));
+
+    if (memory.preferredPaths.some((candidate) => candidate === path)) {
+      score += 60;
+    }
+
+    if (pathSignal) {
+      score += pathSignal.candidateCount;
+      score += pathSignal.changedCount * 6;
+      score += pathSignal.successfulValidationCount * 10;
+      score += pathSignal.publishedCount * 14;
+    }
+
+    if (recentIssue) {
+      score += recentIssue.status === 'published' || recentIssue.status === 'pr_opened' ? 12 : 6;
+    }
+
+    if (fileName === 'readme.md') {
+      score += 62;
+    }
+
+    if (['package.json', 'pyproject.toml', 'cargo.toml', 'go.mod', 'makefile'].includes(fileName)) {
+      score += 68;
+    }
+
+    if (/(^|\/)(test|tests|__tests__)\/|\.test\.|\.spec\./.test(lowerPath)) {
+      score += 34;
+    }
+
+    if (/\.(ts|tsx|js|jsx|py|go|rs|java|kt)$/.test(fileName)) {
+      score += 28;
+    }
+
+    if (/\.(md|mdx)$/.test(fileName)) {
+      score += 12;
+    }
+
+    if (/\.(png|jpg|jpeg|gif|webp|ico|svg|lock|map)$/.test(fileName)) {
+      score -= 20;
+    }
+
+    if (lowerPath.includes('archive') || lowerPath.includes('vendor')) {
+      score -= 12;
+    }
+
+    return score;
   }
 
   private scorePath(path: string, keywords: string[], memory: RepoMemory, referencedPaths: string[]): number {

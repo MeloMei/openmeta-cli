@@ -1,4 +1,4 @@
-import type { PatchDraft, PullRequestDraft } from '../../src/contracts/index.js';
+import type { PatchDraft, PullRequestDraft, RepositoryImprovementSuggestion } from '../../src/contracts/index.js';
 import type {
   ContributionInboxItem,
   GitHubIssue,
@@ -197,6 +197,37 @@ export function createPullRequestDraft(overrides: Partial<PullRequestDraft> = {}
     ],
     validation: ['bun test (pending)'],
     risks: ['Consumers may need to update snapshots that cover button rendering'],
+    ...overrides,
+  };
+}
+
+export function createRepositorySuggestion(
+  overrides: Partial<RepositoryImprovementSuggestion> = {},
+): RepositoryImprovementSuggestion {
+  return {
+    id: 'docs-install',
+    title: 'Document local install',
+    summary: 'Clarify how contributors can install and link the CLI locally.',
+    rationale: 'The README explains the product but does not give a reliable local setup path.',
+    targetFiles: [
+      {
+        path: 'README.md',
+        reason: 'Primary contributor onboarding surface',
+      },
+    ],
+    proposedChanges: [
+      'Add a local installation section',
+      'Document the expected validation command',
+    ],
+    validationPlan: [
+      'Run bun run build',
+      'Review README commands for accuracy',
+    ],
+    risks: [
+      'Install steps may change if packaging changes later',
+    ],
+    estimatedWorkload: 'small',
+    prPotentialScore: 84,
     ...overrides,
   };
 }

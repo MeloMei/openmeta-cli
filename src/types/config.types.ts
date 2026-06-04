@@ -16,6 +16,7 @@ export interface GitHubConfig {
 }
 
 export type LLMProvider = 'openai' | 'minimax' | 'moonshot' | 'zhipu' | 'gemini' | 'claude' | 'custom';
+export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface LLMProviderProfile {
   provider: LLMProvider;
@@ -23,6 +24,8 @@ export interface LLMProviderProfile {
   apiKey: string;
   modelName: string;
   apiHeaders: Record<string, string>;
+  reasoningEffort?: LLMReasoningEffort;
+  stream?: boolean;
 }
 
 export interface LLMConfig {
@@ -31,6 +34,8 @@ export interface LLMConfig {
   apiKey: string;
   modelName: string;
   apiHeaders?: Record<string, string>;
+  reasoningEffort?: LLMReasoningEffort;
+  stream?: boolean;
   activeProfile?: string;
   profiles?: Record<string, LLMProviderProfile>;
 }

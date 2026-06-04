@@ -8,6 +8,7 @@ import {
   createProofRecord,
   createPullRequestDraft,
   createRankedIssue,
+  createRepositorySuggestion,
   createWorkspace,
 } from './helpers/factories.js';
 
@@ -62,6 +63,41 @@ describe('contentService', () => {
     expect(markdown).toContain('## Summary');
     expect(markdown).toContain('## Changes');
     expect(markdown).toContain('## Validation');
+  });
+
+  test('formats repository analysis suggestions as markdown', () => {
+    const selectedSuggestion = createRepositorySuggestion({
+      id: 'config-validation',
+      title: 'Add config validation tests',
+      prPotentialScore: 91,
+      targetFiles: [
+        { path: 'src/infra/config.ts', reason: 'Config normalization logic' },
+        { path: 'test/config.test.ts', reason: 'Regression coverage' },
+      ],
+    });
+    const markdown = contentService.formatRepositoryAnalysisMarkdown(
+      'acme/demo',
+      createWorkspace({
+        workspacePath: '/tmp/openmeta-demo',
+        defaultBranch: 'main',
+        candidateFiles: ['README.md', 'src/infra/config.ts'],
+      }),
+      [
+        selectedSuggestion,
+        createRepositorySuggestion(),
+      ],
+      selectedSuggestion,
+    );
+
+    expect(markdown).toContain('# Repository Analysis - acme/demo');
+    expect(markdown).toContain('- Workspace Path: /tmp/openmeta-demo');
+    expect(markdown).toContain('- Candidate Files: README.md, src/infra/config.ts');
+    expect(markdown).toContain('## Selected Suggestion');
+    expect(markdown).toContain('Add config validation tests');
+    expect(markdown).toContain('PR Potential: 91/100');
+    expect(markdown).toContain('`src/infra/config.ts` | Config normalization logic');
+    expect(markdown).toContain('## Suggestions');
+    expect(markdown).toContain('### Document local install');
   });
 
   test('formats inbox and proof-of-work markdown summaries', () => {

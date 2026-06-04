@@ -1,4 +1,4 @@
-import type { PatchDraft, PullRequestDraft } from '../contracts/index.js';
+import type { PatchDraft, PullRequestDraft, RepositoryImprovementSuggestion } from '../contracts/index.js';
 import type {
   ContentType,
   ContributionInboxItem,
@@ -133,6 +133,84 @@ export class ContentService {
       '',
       this.formatPullRequestDraftBody(draft),
     ].join('\n');
+  }
+
+  formatRepositoryAnalysisMarkdown(
+    repoFullName: string,
+    workspace: RepoWorkspaceContext,
+    suggestions: RepositoryImprovementSuggestion[],
+    selectedSuggestion?: RepositoryImprovementSuggestion,
+  ): string {
+    const lines = [
+      `# Repository Analysis - ${repoFullName}`,
+      '',
+      '## Workspace',
+      '',
+      `- Workspace Path: ${workspace.workspacePath}`,
+      `- Default Branch: ${workspace.defaultBranch}`,
+      `- Analysis Branch: ${workspace.branchName || 'not created'}`,
+      `- Workspace Dirty: ${workspace.workspaceDirty}`,
+      `- Top-Level Files: ${workspace.topLevelFiles.slice(0, 12).join(', ') || 'n/a'}`,
+      `- Candidate Files: ${workspace.candidateFiles.join(', ') || 'n/a'}`,
+      '',
+      '## Detected Validation',
+      '',
+      ...(workspace.testCommands.length > 0
+        ? workspace.testCommands.map((command) => `- \`${command.command}\` | ${command.reason} | ${command.source}`)
+        : ['- None detected']),
+      '',
+    ];
+
+    if (selectedSuggestion) {
+      lines.push(
+        '## Selected Suggestion',
+        '',
+        ...this.formatRepositorySuggestionMarkdown(selectedSuggestion),
+        '',
+      );
+    }
+
+    lines.push(
+      '## Suggestions',
+      '',
+      ...(suggestions.length > 0
+        ? suggestions.flatMap((suggestion) => [
+          `### ${suggestion.title}`,
+          '',
+          ...this.formatRepositorySuggestionMarkdown(suggestion),
+          '',
+        ])
+        : ['- No repository suggestions were generated.', '']),
+      `_Generated at ${new Date().toISOString()}_`,
+      '',
+    );
+
+    return lines.join('\n');
+  }
+
+  private formatRepositorySuggestionMarkdown(suggestion: RepositoryImprovementSuggestion): string[] {
+    return [
+      `ID: ${suggestion.id}`,
+      `PR Potential: ${suggestion.prPotentialScore}/100`,
+      `Estimated Workload: ${suggestion.estimatedWorkload}`,
+      '',
+      suggestion.summary,
+      '',
+      'Rationale:',
+      suggestion.rationale,
+      '',
+      'Target Files:',
+      ...suggestion.targetFiles.map((file) => `- \`${file.path}\` | ${file.reason}`),
+      '',
+      'Proposed Changes:',
+      ...suggestion.proposedChanges.map((change) => `- ${change}`),
+      '',
+      'Validation Plan:',
+      ...(suggestion.validationPlan.length > 0 ? suggestion.validationPlan.map((step) => `- ${step}`) : ['- Not specified']),
+      '',
+      'Risks:',
+      ...(suggestion.risks.length > 0 ? suggestion.risks.map((risk) => `- ${risk}`) : ['- None']),
+    ];
   }
 
   formatContributionDossier(

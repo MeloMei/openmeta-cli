@@ -1,4 +1,5 @@
 export { registerAgentCommand } from './agent.js';
+export { registerAnalyzeCommand } from './analyze.js';
 export { registerInitCommand } from './init.js';
 export { registerDailyCommand } from './daily.js';
 export { registerScoutCommand } from './scout.js';

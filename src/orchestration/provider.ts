@@ -1,13 +1,15 @@
-import { configService, prompt, selectPrompt, ui } from '../infra/index.js';
+import { configService, DEFAULT_LLM_REASONING_EFFORT, LLM_REASONING_EFFORTS, parseLLMReasoningEffort, prompt, selectPrompt, ui } from '../infra/index.js';
 import { LLM_PROVIDER_PRESETS, findLLMProviderPreset } from '../services/index.js';
 import { llmService } from '../services/index.js';
-import type { AppConfig, LLMProvider, LLMProviderProfile } from '../types/index.js';
+import type { AppConfig, LLMProvider, LLMProviderProfile, LLMReasoningEffort } from '../types/index.js';
 
 interface ProviderAddOptions {
   provider?: string;
   baseUrl?: string;
   model?: string;
   apiKey?: string;
+  reasoningEffort?: string;
+  stream?: string;
   header?: string[];
   validate?: boolean;
 }
@@ -64,6 +66,23 @@ function requireValue(value: string | undefined, label: string): string {
   return trimmed;
 }
 
+function parseBooleanOption(value: string | undefined, label: string): boolean {
+  if (value === undefined) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+
+  if (['false', '0', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  throw new Error(`${label} must be true or false.`);
+}
+
 export class ProviderOrchestrator {
   async list(): Promise<void> {
     const config = await configService.get();
@@ -100,6 +119,8 @@ export class ProviderOrchestrator {
         ],
         lines: [
           `API key: ${ui.maskSecret(profile.apiKey)}`,
+          `Reasoning effort: ${profile.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
+          `Streaming: ${profile.stream ? 'yes' : 'no'}`,
           `Extra headers: ${Object.keys(profile.apiHeaders || {}).length > 0 ? JSON.stringify(profile.apiHeaders) : '(none)'}`,
         ],
         tone: config.llm.activeProfile === name ? 'success' : 'info',
@@ -137,6 +158,10 @@ export class ProviderOrchestrator {
       modelName: requireValue(options.model, 'model'),
       apiKey: requireValue(options.apiKey, 'API key'),
       apiHeaders: parseHeaders(options.header?.filter(Boolean) ?? []),
+      reasoningEffort: options.reasoningEffort
+        ? parseLLMReasoningEffort(options.reasoningEffort)
+        : DEFAULT_LLM_REASONING_EFFORT,
+      stream: parseBooleanOption(options.stream, 'stream'),
     };
     const updated = await this.saveProfile(config, name, profile, config.llm.activeProfile);
 
@@ -148,6 +173,8 @@ export class ProviderOrchestrator {
         `Profile: ${name}`,
         `Provider: ${profile.provider}`,
         `Model: ${profile.modelName}`,
+        `Reasoning effort: ${profile.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
+        `Streaming: ${profile.stream ? 'yes' : 'no'}`,
         `Endpoint: ${profile.apiBaseUrl}`,
         `Active profile: ${updated.llm.activeProfile || '(none)'}`,
       ],
@@ -248,6 +275,9 @@ export class ProviderOrchestrator {
       },
     ]);
 
+    const reasoningEffort = await this.promptReasoningEffort(config.llm.reasoningEffort);
+    const stream = await this.promptLlmStreaming(config.llm.stream);
+
     const { extraHeaders } = await prompt<{ extraHeaders: string }>([
       {
         type: 'input',
@@ -292,6 +322,8 @@ export class ProviderOrchestrator {
       apiBaseUrl,
       modelName,
       apiKey: apiKey.trim(),
+      reasoningEffort,
+      stream,
       apiHeaders: {
         ...(preset.apiHeaders || {}),
         ...parseHeaderInput(extraHeaders),
@@ -313,6 +345,8 @@ export class ProviderOrchestrator {
         `Profile: ${name}`,
         `Provider: ${profile.provider}`,
         `Model: ${profile.modelName}`,
+        `Reasoning effort: ${profile.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
+        `Streaming: ${profile.stream ? 'yes' : 'no'}`,
         `Endpoint: ${profile.apiBaseUrl}`,
       ],
       tone: 'success',
@@ -332,6 +366,8 @@ export class ProviderOrchestrator {
         ...config.llm,
         ...profile,
         apiHeaders: profile.apiHeaders ?? config.llm.apiHeaders ?? {},
+        reasoningEffort: profile.reasoningEffort ?? DEFAULT_LLM_REASONING_EFFORT,
+        stream: profile.stream === true,
         activeProfile: name,
         profiles: config.llm.profiles ?? {},
       },
@@ -355,6 +391,8 @@ export class ProviderOrchestrator {
         `Profile: ${name}`,
         `Provider: ${updated.llm.provider}`,
         `Model: ${updated.llm.modelName}`,
+        `Reasoning effort: ${updated.llm.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
+        `Streaming: ${updated.llm.stream ? 'yes' : 'no'}`,
         `Endpoint: ${updated.llm.apiBaseUrl}`,
         validationDetail,
       ],
@@ -433,6 +471,8 @@ export class ProviderOrchestrator {
       apiKey: config.llm.apiKey,
       modelName: config.llm.modelName,
       apiHeaders: config.llm.apiHeaders ?? {},
+      reasoningEffort: config.llm.reasoningEffort ?? DEFAULT_LLM_REASONING_EFFORT,
+      stream: config.llm.stream === true,
     };
   }
 
@@ -451,6 +491,8 @@ export class ProviderOrchestrator {
           [name]: {
             ...profile,
             apiHeaders: profile.apiHeaders ?? {},
+            reasoningEffort: profile.reasoningEffort ?? DEFAULT_LLM_REASONING_EFFORT,
+            stream: profile.stream === true,
           },
         },
       },
@@ -464,9 +506,35 @@ export class ProviderOrchestrator {
       profile.modelName,
       profile.apiHeaders,
       profile.provider,
+      profile.reasoningEffort ?? DEFAULT_LLM_REASONING_EFFORT,
+      profile.stream === true,
     );
 
     return llmService.validateConnection();
+  }
+
+  private async promptReasoningEffort(defaultValue?: AppConfig['llm']['reasoningEffort']): Promise<LLMReasoningEffort> {
+    return selectPrompt<LLMReasoningEffort>({
+      message: 'Select reasoning effort:',
+      default: defaultValue || DEFAULT_LLM_REASONING_EFFORT,
+      choices: LLM_REASONING_EFFORTS.map((effort) => ({
+        name: effort,
+        value: effort,
+      })),
+    });
+  }
+
+  private async promptLlmStreaming(defaultValue?: boolean): Promise<boolean> {
+    const { stream } = await prompt<{ stream: boolean }>([
+      {
+        type: 'confirm',
+        name: 'stream',
+        message: 'Use streaming LLM responses?',
+        default: defaultValue === true,
+      },
+    ]);
+
+    return stream;
   }
 }
 

@@ -3,7 +3,7 @@ import type { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-meth
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { GitHubIssue } from '../types/index.js';
-import { ensureDirectory, getOpenMetaStateDir } from '../infra/index.js';
+import { ensureDirectory, getOpenMetaStateDir, parseGitHubRepoFullName } from '../infra/index.js';
 import { logger } from '../infra/logger.js';
 
 const FILTER_LABEL_GROUPS = [
@@ -54,6 +54,7 @@ interface IssueCachePayload {
 
 interface IssueDiscoveryOptions {
   refresh?: boolean;
+  repoFullName?: string;
   onStatus?: (message: string) => void;
 }
 
@@ -95,8 +96,10 @@ export class GitHubService {
       throw new Error('GitHub service not initialized');
     }
 
+    const repoFullName = options.repoFullName ? parseGitHubRepoFullName(options.repoFullName) : undefined;
+
     if (!options.refresh) {
-      const cachedIssues = this.loadCachedIssues();
+      const cachedIssues = this.loadCachedIssues(repoFullName);
       if (cachedIssues) {
         logger.info(`Using cached GitHub issues (${cachedIssues.length}) to avoid unnecessary Search API calls.`);
         return cachedIssues;
@@ -112,14 +115,14 @@ export class GitHubService {
     const failures: SearchFailure[] = [];
 
     try {
-      for (const labelGroup of FILTER_LABEL_GROUPS) {
+      if (repoFullName) {
         try {
-          const searchQuery = this.buildSearchQuery(labelGroup);
-          options.onStatus?.(this.buildSearchStatusMessage(labelGroup));
-          const items = await this.paginateSearchWithRetry(searchQuery, labelGroup, options.onStatus);
+          const searchQuery = this.buildRepositorySearchQuery(repoFullName);
+          options.onStatus?.(`Pulling open issue candidates for ${repoFullName}...`);
+          const items = await this.paginateSearchWithRetry(searchQuery, [repoFullName], options.onStatus);
 
           logger.debug(`Search query: ${searchQuery}`);
-          logger.debug(`Fetched ${items.length} total results for "${labelGroup.join(' / ')}"`);
+          logger.debug(`Fetched ${items.length} total results for "${repoFullName}"`);
 
           for (const item of items) {
             if (!this.shouldIncludeIssue(item)) {
@@ -138,9 +141,41 @@ export class GitHubService {
           }
         } catch (error) {
           const failure = this.describeSearchFailure(error);
-          failures.push({ labelGroup, ...failure });
-          logger.debug(`Issue search failed for labels "${labelGroup.join('" / "')}". ${failure.reason}`);
+          failures.push({ labelGroup: [repoFullName], ...failure });
+          logger.debug(`Issue search failed for repository "${repoFullName}". ${failure.reason}`);
           options.onStatus?.('GitHub search is being stubborn, but OpenMeta is still pulling together the best issue set it can.');
+        }
+      } else {
+        for (const labelGroup of FILTER_LABEL_GROUPS) {
+          try {
+            const searchQuery = this.buildSearchQuery(labelGroup);
+            options.onStatus?.(this.buildSearchStatusMessage(labelGroup));
+            const items = await this.paginateSearchWithRetry(searchQuery, labelGroup, options.onStatus);
+
+            logger.debug(`Search query: ${searchQuery}`);
+            logger.debug(`Fetched ${items.length} total results for "${labelGroup.join(' / ')}"`);
+
+            for (const item of items) {
+              if (!this.shouldIncludeIssue(item)) {
+                continue;
+              }
+
+              const repoId = this.parseRepositoryUrl(item.repository_url);
+              const issueKey = `${repoId.fullName}#${item.number}`;
+
+              if (seenIssueKeys.has(issueKey)) {
+                continue;
+              }
+
+              seenIssueKeys.add(issueKey);
+              candidateItems.push(item);
+            }
+          } catch (error) {
+            const failure = this.describeSearchFailure(error);
+            failures.push({ labelGroup, ...failure });
+            logger.debug(`Issue search failed for labels "${labelGroup.join('" / "')}". ${failure.reason}`);
+            options.onStatus?.('GitHub search is being stubborn, but OpenMeta is still pulling together the best issue set it can.');
+          }
         }
       }
 
@@ -172,8 +207,10 @@ export class GitHubService {
         });
       }
 
-      logger.success(`Fetched ${issues.length} trending issues from ${FILTER_LABEL_GROUPS.length} label searches`);
-      this.saveCachedIssues(issues);
+      logger.success(repoFullName
+        ? `Fetched ${issues.length} open issues from ${repoFullName}`
+        : `Fetched ${issues.length} trending issues from ${FILTER_LABEL_GROUPS.length} label searches`);
+      this.saveCachedIssues(issues, repoFullName);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('GitHub issue discovery')) {
         throw error;
@@ -184,6 +221,47 @@ export class GitHubService {
     }
 
     return issues;
+  }
+
+  async fetchIssue(repoFullName: string, issueNumber: number): Promise<GitHubIssue> {
+    if (!this.octokit) {
+      throw new Error('GitHub service not initialized');
+    }
+
+    const normalizedRepo = parseGitHubRepoFullName(repoFullName);
+    const [owner, repo] = normalizedRepo.split('/');
+    if (!owner || !repo) {
+      throw new Error(`Invalid GitHub repository reference: ${repoFullName}`);
+    }
+
+    const response = await this.octokit.rest.issues.get({
+      owner,
+      repo,
+      issue_number: issueNumber,
+    });
+    const item = response.data as SearchIssueItem;
+
+    if (!this.shouldIncludeIssue(item)) {
+      throw new Error(`${normalizedRepo}#${issueNumber} cannot be handled automatically because it is a pull request, locked, assigned, or carries an action-blocking label.`);
+    }
+
+    const repoId = this.parseRepositoryUrl(item.repository_url || `https://api.github.com/repos/${normalizedRepo}`);
+    const repoData = await this.fetchRepoMetadata(repoId, new Map());
+
+    return {
+      id: item.id,
+      number: item.number,
+      title: item.title,
+      body: item.body || '',
+      htmlUrl: item.html_url,
+      repoName: repoId.repo,
+      repoFullName: repoId.fullName,
+      repoDescription: repoData.description,
+      repoStars: repoData.stars,
+      labels: this.extractLabelNames(item),
+      createdAt: item.created_at,
+      updatedAt: item.updated_at,
+    };
   }
 
   async validateTargetRepo(path: string): Promise<boolean> {
@@ -201,9 +279,14 @@ export class GitHubService {
     return this.username;
   }
 
-  private buildSearchQuery(labels: readonly string[]): string {
+  private buildSearchQuery(labels: readonly string[], repoFullName?: string): string {
     const joinedLabels = labels.map((label) => `label:"${label}"`).join(' OR ');
-    return `(${joinedLabels}) archived:false is:issue is:open no:assignee`;
+    const repoScope = repoFullName ? `repo:${repoFullName} ` : '';
+    return `${repoScope}(${joinedLabels}) archived:false is:issue is:open no:assignee`;
+  }
+
+  private buildRepositorySearchQuery(repoFullName: string): string {
+    return `repo:${repoFullName} archived:false is:issue is:open no:assignee`;
   }
 
   private shouldIncludeIssue(item: SearchIssueItem): boolean {
@@ -467,12 +550,15 @@ export class GitHubService {
     return `GitHub issue discovery failed for all label groups: ${failures.map((failure) => failure.labelGroup.join('/')).join(', ')}.`;
   }
 
-  private getCachePath(): string {
-    return join(ensureDirectory(join(getOpenMetaStateDir(), 'cache')), 'github-issues.json');
+  private getCachePath(repoFullName?: string): string {
+    const cacheFile = repoFullName
+      ? `github-issues-${repoFullName.replace(/\//g, '__')}.json`
+      : 'github-issues.json';
+    return join(ensureDirectory(join(getOpenMetaStateDir(), 'cache')), cacheFile);
   }
 
-  private loadCachedIssues(): GitHubIssue[] | null {
-    const cachePath = this.getCachePath();
+  private loadCachedIssues(repoFullName?: string): GitHubIssue[] | null {
+    const cachePath = this.getCachePath(repoFullName);
     if (!existsSync(cachePath)) {
       return null;
     }
@@ -495,14 +581,14 @@ export class GitHubService {
     }
   }
 
-  private saveCachedIssues(issues: GitHubIssue[]): void {
+  private saveCachedIssues(issues: GitHubIssue[], repoFullName?: string): void {
     try {
       const payload: IssueCachePayload = {
         fetchedAt: new Date().toISOString(),
         issues,
       };
 
-      writeFileSync(this.getCachePath(), JSON.stringify(payload, null, 2), 'utf-8');
+      writeFileSync(this.getCachePath(repoFullName), JSON.stringify(payload, null, 2), 'utf-8');
     } catch (error) {
       logger.debug('Unable to save GitHub issue cache', error);
     }

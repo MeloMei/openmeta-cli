@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import type { AppConfig } from '../types/index.js';
 import { CryptoService } from './crypto.js';
 import { logger } from './logger.js';
+import { DEFAULT_LLM_REASONING_EFFORT, parseLLMReasoningEffort } from './llm-reasoning.js';
 
 function getConfigDirPath(): string {
   return process.env['OPENMETA_CONFIG_DIR'] || join(homedir(), '.config', 'openmeta');
@@ -43,6 +44,8 @@ function createDefaultConfig(): AppConfig {
       apiKey: '',
       modelName: 'gpt-4o-mini',
       apiHeaders: {},
+      reasoningEffort: DEFAULT_LLM_REASONING_EFFORT,
+      stream: false,
       activeProfile: '',
       profiles: {},
     },
@@ -182,10 +185,9 @@ export class ConfigService {
           ...defaults.llm.apiHeaders,
           ...config.llm?.apiHeaders,
         },
-        profiles: {
-          ...defaults.llm.profiles,
-          ...config.llm?.profiles,
-        },
+        reasoningEffort: this.normalizeReasoningEffort(config.llm?.reasoningEffort),
+        stream: config.llm?.stream === true,
+        profiles: this.normalizeProviderProfiles(config.llm?.profiles),
       },
       automation: {
         ...defaults.automation,
@@ -216,6 +218,32 @@ export class ConfigService {
         apiKey: profile.apiKey && CryptoService.isEncrypted(profile.apiKey)
           ? CryptoService.decrypt(profile.apiKey)
           : profile.apiKey,
+      },
+    ]));
+  }
+
+  private normalizeReasoningEffort(value: unknown): AppConfig['llm']['reasoningEffort'] {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      return DEFAULT_LLM_REASONING_EFFORT;
+    }
+
+    try {
+      return parseLLMReasoningEffort(value);
+    } catch {
+      return DEFAULT_LLM_REASONING_EFFORT;
+    }
+  }
+
+  private normalizeProviderProfiles(
+    profiles: AppConfig['llm']['profiles'] = {},
+  ): AppConfig['llm']['profiles'] {
+    return Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [
+      name,
+      {
+        ...profile,
+        apiHeaders: profile.apiHeaders ?? {},
+        reasoningEffort: this.normalizeReasoningEffort(profile.reasoningEffort),
+        stream: profile.stream === true,
       },
     ]));
   }

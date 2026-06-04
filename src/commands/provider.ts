@@ -31,12 +31,16 @@ export function registerProviderCommand(program: Command): void {
     .requiredOption('--base-url <url>', 'OpenAI-compatible API base URL')
     .requiredOption('--model <model>', 'Model name')
     .requiredOption('--api-key <key>', 'LLM API key')
+    .option('--reasoning-effort <effort>', 'Reasoning effort: none, minimal, low, medium, high, or xhigh')
+    .option('--stream <enabled>', 'Use streaming chat completions: true or false')
     .option('--header <key=value>', 'Extra API header; repeat for multiple headers', (value, previous: string[] = []) => [...previous, value], [])
     .action((name: string, options: {
       provider?: string;
       baseUrl: string;
       model: string;
       apiKey: string;
+      reasoningEffort?: string;
+      stream?: string;
       header: string[];
     }) => runCommand('OpenMeta Provider', () => providerOrchestrator.add(name, options)));
 

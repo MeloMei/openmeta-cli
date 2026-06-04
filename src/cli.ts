@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import {
   registerAgentCommand,
+  registerAnalyzeCommand,
   registerAutomationCommand,
   registerConfigCommand,
   registerDailyCommand,
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
 
   registerInitCommand(program);
   registerAgentCommand(program);
+  registerAnalyzeCommand(program);
   registerDailyCommand(program);
   registerScoutCommand(program);
   registerInboxCommand(program);

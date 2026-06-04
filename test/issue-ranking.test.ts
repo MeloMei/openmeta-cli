@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { issueRankingService, llmService } from '../src/services/index.js';
+import { githubService, issueRankingService, llmService } from '../src/services/index.js';
 import { createIssue, createMatchedIssue, createRankedIssue } from './helpers/factories.js';
 
 describe('IssueRankingService', () => {
@@ -121,5 +121,138 @@ describe('IssueRankingService', () => {
     expect(matches[0]?.analysis.techRequirements).toContain('React');
     expect(matches[0]?.analysis.estimatedWorkload).toBe('1-3 hours');
     expect(matches[0]?.analysis.solutionSuggestion).toContain('Local scout mode');
+  });
+
+  test('builds a ranked target issue without batch discovery', async () => {
+    const originalFetchIssue = githubService.fetchIssue;
+    const originalScoreIssues = llmService.scoreIssues;
+    const observedFetches: unknown[] = [];
+
+    try {
+      githubService.fetchIssue = async (repoFullName, issueNumber) => {
+        observedFetches.push({ repoFullName, issueNumber });
+        return createIssue({
+          repoFullName: 'Wei-Shaw/sub2api',
+          repoName: 'sub2api',
+          number: 3014,
+          title: 'bug(openai): codex_cli_only 未拦截 /v1/chat/completions 兼容入口',
+          body: 'The issue points to src/openai.ts and includes steps to reproduce.',
+          labels: [],
+        });
+      };
+      llmService.scoreIssues = async (_profile, issues) => ({
+        version: '1',
+        kind: 'issue_match_list',
+        status: 'success',
+        data: issues.map((issue) => createMatchedIssue({
+          ...issue,
+          matchScore: 77,
+          analysis: {
+            coreDemand: issue.title,
+            techRequirements: ['TypeScript', 'OpenAI API'],
+            solutionSuggestion: 'Inspect the compatibility route and add a guard.',
+            estimatedWorkload: '1-2 hours',
+          },
+        })),
+      });
+
+      const [ranked] = await issueRankingService.loadTargetIssue({
+        userProfile: {
+          techStack: ['TypeScript'],
+          proficiency: 'intermediate',
+          focusAreas: ['backend'],
+        },
+        github: {
+          pat: 'ghp-test',
+          username: 'octocat',
+          targetRepoPath: '',
+        },
+        llm: {
+          provider: 'openai',
+          apiBaseUrl: 'https://api.openai.com/v1',
+          apiKey: 'sk-test',
+          modelName: 'gpt-5.5',
+          reasoningEffort: 'none',
+        },
+        automation: {
+          enabled: false,
+          scheduleTime: '09:00',
+          timezone: 'UTC',
+          contentType: 'research_note',
+          scheduler: 'manual',
+          minMatchScore: 70,
+          skipIfAlreadyGeneratedToday: true,
+        },
+        commitTemplate: '{{content}}',
+      }, {
+        repoFullName: 'Wei-Shaw/sub2api',
+        issueNumber: 3014,
+      });
+
+      expect(observedFetches).toEqual([
+        {
+          repoFullName: 'Wei-Shaw/sub2api',
+          issueNumber: 3014,
+        },
+      ]);
+      expect(ranked?.repoFullName).toBe('Wei-Shaw/sub2api');
+      expect(ranked?.number).toBe(3014);
+      expect(ranked?.matchScore).toBe(77);
+      expect(ranked?.opportunity.overallScore).toBeGreaterThan(0);
+    } finally {
+      githubService.fetchIssue = originalFetchIssue;
+      llmService.scoreIssues = originalScoreIssues;
+    }
+  });
+
+  test('passes repository scope to GitHub issue discovery', async () => {
+    const originalFetchTrendingIssues = githubService.fetchTrendingIssues;
+    const observedOptions: unknown[] = [];
+
+    try {
+      githubService.fetchTrendingIssues = async (options) => {
+        observedOptions.push(options);
+        return [];
+      };
+
+      await issueRankingService.loadRankedIssues({
+        userProfile: {
+          techStack: ['TypeScript'],
+          proficiency: 'intermediate',
+          focusAreas: ['web-dev'],
+        },
+        github: {
+          pat: 'ghp-test',
+          username: 'octocat',
+          targetRepoPath: '',
+        },
+        llm: {
+          provider: 'openai',
+          apiBaseUrl: 'https://api.openai.com/v1',
+          apiKey: 'sk-test',
+          modelName: 'gpt-5.5',
+          reasoningEffort: 'none',
+        },
+        automation: {
+          enabled: false,
+          scheduleTime: '09:00',
+          timezone: 'UTC',
+          contentType: 'research_note',
+          scheduler: 'manual',
+          minMatchScore: 70,
+          skipIfAlreadyGeneratedToday: true,
+        },
+        commitTemplate: '{{content}}',
+      }, {
+        repoFullName: 'vercel/next.js',
+        localOnly: true,
+      });
+
+      expect(observedOptions[0]).toMatchObject({
+        repoFullName: 'vercel/next.js',
+      });
+    } finally {
+      githubService.fetchTrendingIssues = originalFetchTrendingIssues;
+    }
   });
 });

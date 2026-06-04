@@ -16,6 +16,11 @@ export const LLM_PROVIDER_PRESETS: LLMProviderPreset[] = [
     value: 'openai',
     baseUrl: 'https://api.openai.com/v1',
     models: [
+      { name: 'GPT-5.5', value: 'gpt-5.5' },
+      { name: 'GPT-5.4', value: 'gpt-5.4' },
+      { name: 'GPT-5.4 mini', value: 'gpt-5.4-mini' },
+      { name: 'GPT-5.1', value: 'gpt-5.1' },
+      { name: 'GPT-5', value: 'gpt-5' },
       { name: 'GPT-4o-mini', value: 'gpt-4o-mini' },
       { name: 'GPT-4o', value: 'gpt-4o' },
       { name: 'GPT-4-turbo', value: 'gpt-4-turbo' },

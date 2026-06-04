@@ -9,12 +9,19 @@ import type { GitHubIssue } from '../src/types/index.js';
 interface GitHubServiceInternals {
   octokit: {
     rest: {
+      issues: {
+        get: (params: { owner: string; repo: string; issue_number: number }) => Promise<{ data: unknown }>;
+      };
+      repos: {
+        get: (params: { owner: string; repo: string }) => Promise<{ data: { description?: string | null; stargazers_count?: number | null } }>;
+      };
       search: {
-        issuesAndPullRequests: (params?: { page?: number }) => Promise<{ data: { total_count: number; items: unknown[] } }>;
+        issuesAndPullRequests: (params?: { q?: string; page?: number }) => Promise<{ data: { total_count: number; items: unknown[] } }>;
       };
     };
   } | null;
-  buildSearchQuery(labels: readonly string[]): string;
+  buildSearchQuery(labels: readonly string[], repoFullName?: string): string;
+  buildRepositorySearchQuery(repoFullName: string): string;
   shouldIncludeIssue(item: Record<string, unknown>): boolean;
   parseRepositoryUrl(repositoryUrl: string): { owner: string; repo: string; fullName: string };
   extractLabelNames(item: { labels: Array<string | { name?: string | null }> }): string[];
@@ -26,9 +33,9 @@ interface GitHubServiceInternals {
   }>): string;
   paginateSearchWithRetry(searchQuery: string): Promise<Array<{ id: number; number: number }>>;
   delay(ms: number): Promise<void>;
-  loadCachedIssues(): GitHubIssue[] | null;
-  saveCachedIssues(issues: GitHubIssue[]): void;
-  getCachePath(): string;
+  loadCachedIssues(repoFullName?: string): GitHubIssue[] | null;
+  saveCachedIssues(issues: GitHubIssue[], repoFullName?: string): void;
+  getCachePath(repoFullName?: string): string;
 }
 
 let tempRoot = '';
@@ -89,6 +96,18 @@ describe('GitHubService internals', () => {
     expect(query).toContain('no:assignee');
   });
 
+  test('builds repository-scoped GitHub search queries', () => {
+    const service = new GitHubService() as unknown as GitHubServiceInternals;
+    const query = service.buildRepositorySearchQuery('vercel/next.js');
+
+    expect(query).toContain('repo:vercel/next.js');
+    expect(query).not.toContain('label:');
+    expect(query).toContain('archived:false');
+    expect(query).toContain('is:issue');
+    expect(query).toContain('is:open');
+    expect(query).toContain('no:assignee');
+  });
+
   test('filters out pull requests, locked issues, and assigned issues', () => {
     const service = new GitHubService() as unknown as GitHubServiceInternals;
 
@@ -139,6 +158,117 @@ describe('GitHubService internals', () => {
     });
 
     expect(labels).toEqual(['good first issue', 'help wanted']);
+  });
+
+  test('fetches a single issue from a target repository', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+    const observedIssueRequests: unknown[] = [];
+    const observedRepoRequests: unknown[] = [];
+
+    internals.octokit = {
+      rest: {
+        issues: {
+          get: async (params: { owner: string; repo: string; issue_number: number }) => {
+            observedIssueRequests.push(params);
+            return {
+              data: {
+                id: 3014,
+                number: 3014,
+                title: 'bug(openai): codex_cli_only 未拦截 /v1/chat/completions 兼容入口',
+                body: 'Steps to reproduce are listed here.',
+                html_url: 'https://github.com/Wei-Shaw/sub2api/issues/3014',
+                repository_url: 'https://api.github.com/repos/Wei-Shaw/sub2api',
+                labels: [],
+                created_at: '2026-06-03T00:00:00.000Z',
+                updated_at: '2026-06-03T01:00:00.000Z',
+                locked: false,
+                assignees: [],
+              },
+            };
+          },
+        },
+        repos: {
+          get: async (params: { owner: string; repo: string }) => {
+            observedRepoRequests.push(params);
+            return {
+              data: {
+                description: 'Sub converter API',
+                stargazers_count: 1234,
+              },
+            };
+          },
+        },
+        search: {
+          issuesAndPullRequests: async () => ({
+            data: {
+              total_count: 0,
+              items: [],
+            },
+          }),
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    const issue = await service.fetchIssue('https://github.com/Wei-Shaw/sub2api', 3014);
+
+    expect(observedIssueRequests).toEqual([
+      {
+        owner: 'Wei-Shaw',
+        repo: 'sub2api',
+        issue_number: 3014,
+      },
+    ]);
+    expect(observedRepoRequests).toEqual([
+      {
+        owner: 'Wei-Shaw',
+        repo: 'sub2api',
+      },
+    ]);
+    expect(issue).toMatchObject({
+      number: 3014,
+      repoFullName: 'Wei-Shaw/sub2api',
+      repoName: 'sub2api',
+      repoDescription: 'Sub converter API',
+      repoStars: 1234,
+    });
+  });
+
+  test('rejects pull requests and blocked single issue targets', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+
+    internals.octokit = {
+      rest: {
+        issues: {
+          get: async () => ({
+            data: {
+              id: 44,
+              number: 44,
+              title: 'Blocked target',
+              body: '',
+              html_url: 'https://github.com/acme/demo/issues/44',
+              repository_url: 'https://api.github.com/repos/acme/demo',
+              labels: [{ name: 'blocked' }],
+              created_at: '2026-06-03T00:00:00.000Z',
+              updated_at: '2026-06-03T01:00:00.000Z',
+              locked: false,
+              assignees: [],
+            },
+          }),
+        },
+        repos: {
+          get: async () => ({ data: { description: '', stargazers_count: 0 } }),
+        },
+        search: {
+          issuesAndPullRequests: async () => ({ data: { total_count: 0, items: [] } }),
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    await expect(service.fetchIssue('acme/demo', 44)).rejects.toThrow(
+      'cannot be handled automatically',
+    );
   });
 
   test('classifies search failures by rate limit and validation errors', () => {
@@ -237,6 +367,36 @@ describe('GitHubService internals', () => {
     expect(cached).toHaveLength(1);
     expect(refreshed).toEqual([]);
     expect(searchCalls).toBe(2);
+  });
+
+  test('keeps global and repository-scoped issue discovery caches separate', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+    const queries: string[] = [];
+
+    internals.saveCachedIssues([createIssue({ repoFullName: 'global/cache' })]);
+    internals.octokit = {
+      rest: {
+        search: {
+          issuesAndPullRequests: async (params?: { q?: string; page?: number }) => {
+            queries.push(params?.q || '');
+            return {
+              data: {
+                total_count: 0,
+                items: [],
+              },
+            };
+          },
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    const repoIssues = await service.fetchTrendingIssues({ repoFullName: 'vercel/next.js' });
+
+    expect(repoIssues).toEqual([]);
+    expect(queries).toHaveLength(1);
+    expect(queries.every((query) => query.includes('repo:vercel/next.js'))).toBe(true);
+    expect(queries.every((query) => !query.includes('label:'))).toBe(true);
   });
 
   test('falls back to the conservative delay when retry-after is invalid', async () => {

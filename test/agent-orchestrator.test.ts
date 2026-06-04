@@ -114,6 +114,10 @@ interface AgentOrchestratorInternals {
     getRemotes(verbose: boolean): Promise<Array<{ name: string; refs: { fetch?: string; push?: string } }>>;
   }): Promise<string>;
   getGitHubRepositoryInfo(owner: string, repo: string): Promise<{ default_branch?: string }>;
+  detectLocalDefaultBranch(git: {
+    raw(args: string[]): Promise<string>;
+    branch(): Promise<{ all: string[]; current: string }>;
+  }): Promise<string>;
   prepareLocalRepository(git: {
     fetch(remote: string, branch: string): Promise<void>;
     checkout(args: string[] | string): Promise<void>;
@@ -855,6 +859,31 @@ describe('AgentOrchestrator support behavior', () => {
     }));
   });
 
+  test('detectLocalDefaultBranch prefers origin HEAD, common branch names, then the current branch', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+
+    await expect(orchestrator.detectLocalDefaultBranch({
+      raw: async () => 'refs/remotes/origin/master\n',
+      branch: async () => {
+        throw new Error('branch should not be checked when origin HEAD exists');
+      },
+    })).resolves.toBe('master');
+
+    await expect(orchestrator.detectLocalDefaultBranch({
+      raw: async () => {
+        throw new Error('origin HEAD missing');
+      },
+      branch: async () => ({ all: ['openmeta-artifacts', 'main'], current: 'openmeta-artifacts' }),
+    })).resolves.toBe('main');
+
+    await expect(orchestrator.detectLocalDefaultBranch({
+      raw: async () => {
+        throw new Error('origin HEAD missing');
+      },
+      branch: async () => ({ all: ['feature'], current: 'feature' }),
+    })).resolves.toBe('feature');
+  });
+
   test('manages origin remotes, parses existing origin URLs, and fails clearly when origin is missing', async () => {
     const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
     let addedRemote = '';
@@ -994,5 +1023,37 @@ describe('AgentOrchestrator support behavior', () => {
     expect(managedTarget.owner).toBe('octocat');
     expect(managedTarget.repo).toBe('openmeta-daily');
     expect(managedTarget.defaultBranch).toBe('main');
+  });
+
+  test('ensureTargetRepo falls back to the local default branch when configured target metadata is unavailable', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const targetRepoPath = mkdtempSync(join(tmpdir(), 'openmeta-agent-target-repo-private-'));
+    tempDirs.push(targetRepoPath);
+
+    spyOn(simpleGitModule, 'simpleGit').mockImplementation(() => ({
+      getRemotes: async () => [{
+        name: 'origin',
+        refs: {
+          fetch: 'https://github.com/Zbl1007/openmeta.git',
+          push: 'https://github.com/Zbl1007/openmeta.git',
+        },
+      }],
+      raw: async () => 'refs/remotes/origin/master\n',
+      branch: async () => ({ all: ['master', 'openmeta-artifacts'], current: 'openmeta-artifacts' }),
+    } as never));
+    spyOn(orchestrator as object as { getGitHubRepositoryInfo: () => Promise<unknown> }, 'getGitHubRepositoryInfo').mockRejectedValue({ status: 404 });
+
+    await expect(orchestrator.ensureTargetRepo(createConfig({
+      github: {
+        pat: 'ghp_test_token',
+        username: 'zbl1007',
+        targetRepoPath,
+      },
+    }))).resolves.toEqual({
+      path: targetRepoPath,
+      owner: 'Zbl1007',
+      repo: 'openmeta',
+      defaultBranch: 'master',
+    });
   });
 });

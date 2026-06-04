@@ -42,6 +42,8 @@ describe('ProviderOrchestrator', () => {
         apiBaseUrl: 'https://example.com/v1',
         modelName: 'example-model',
         apiKey: 'sk-profile-secret',
+        reasoningEffort: 'high',
+        stream: true,
       },
     });
 
@@ -57,6 +59,8 @@ describe('ProviderOrchestrator', () => {
       modelName: 'example-model',
       apiKey: 'sk-profile-secret',
       apiHeaders: {},
+      reasoningEffort: 'high',
+      stream: true,
     });
     expect(loaded.llm.activeProfile).toBe('example');
   });
@@ -69,6 +73,8 @@ describe('ProviderOrchestrator', () => {
       baseUrl: 'https://api2.henng.cn/v1',
       model: 'gpt-5.4',
       apiKey: 'sk-henng-secret',
+      reasoningEffort: 'low',
+      stream: 'true',
       header: ['X-Test=yes'],
     });
     await orchestrator.use('henng-gpt54');
@@ -78,6 +84,8 @@ describe('ProviderOrchestrator', () => {
     expect(loaded.llm.apiBaseUrl).toBe('https://api2.henng.cn/v1');
     expect(loaded.llm.modelName).toBe('gpt-5.4');
     expect(loaded.llm.apiKey).toBe('sk-henng-secret');
+    expect(loaded.llm.reasoningEffort).toBe('low');
+    expect(loaded.llm.stream).toBe(true);
     expect(loaded.llm.apiHeaders).toEqual({ 'X-Test': 'yes' });
     expect(loaded.llm.activeProfile).toBe('henng-gpt54');
   });
