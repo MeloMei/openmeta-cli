@@ -39,7 +39,7 @@ function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       overallWeights: { technicalMatch: 0.45, opportunityScore: 0.55 },
       preset: 'balanced',
     },
-    commitTemplate: 'feat(daily): {title}\n\n{content}',
+    commitTemplate: 'feat(daily): {{title}}\n\n{{content}}',
   };
 
   return {

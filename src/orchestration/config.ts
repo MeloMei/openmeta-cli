@@ -298,8 +298,8 @@ export class ConfigOrchestrator {
 
     if (selectedPreset !== 'custom') {
       const preset = getPreset(selectedPreset)!;
-      newWeights = preset.weights;
-      newOverallWeights = preset.overallWeights;
+      newWeights = { ...preset.weights };
+      newOverallWeights = { ...preset.overallWeights };
     } else {
       ui.section('Custom weights', 'Enter a value between 0 and 100 for each dimension. They will be normalized automatically.');
 
@@ -320,9 +320,9 @@ export class ConfigOrchestrator {
           message: `${entry.label} (0-100)`,
           default: String(entry.default),
         }]);
-        const num = Number.parseInt(result.value, 10);
+        const num = Number.parseFloat(result.value);
         if (Number.isNaN(num) || num < 0 || num > 100) {
-          throw new Error('Weight must be an integer between 0 and 100.');
+          throw new Error('Weight must be a number between 0 and 100.');
         }
         rawWeights[entry.key] = num / 100;
       }
@@ -345,9 +345,9 @@ export class ConfigOrchestrator {
           message: `${entry.label} (0-100)`,
           default: String(entry.default),
         }]);
-        const num = Number.parseInt(result.value, 10);
+        const num = Number.parseFloat(result.value);
         if (Number.isNaN(num) || num < 0 || num > 100) {
-          throw new Error('Weight must be an integer between 0 and 100.');
+          throw new Error('Weight must be a number between 0 and 100.');
         }
         rawOverall[entry.key] = num / 100;
       }

@@ -39,8 +39,8 @@ export const SCORING_PRESETS: ScoringPreset[] = [
 ];
 
 export const DEFAULT_SCORING: ScoringConfig = {
-  weights: SCORING_PRESETS[0]!.weights,
-  overallWeights: SCORING_PRESETS[0]!.overallWeights,
+  weights: { ...SCORING_PRESETS[0]!.weights },
+  overallWeights: { ...SCORING_PRESETS[0]!.overallWeights },
   preset: 'balanced',
 };
 
