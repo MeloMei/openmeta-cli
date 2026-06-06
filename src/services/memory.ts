@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { ensureDirectory, getOpenMetaStateDir, getLocalDateStamp } from '../infra/index.js';
 import type { RankedIssue, RepoMemory, RepoWorkspaceContext, TestResult } from '../types/index.js';
@@ -119,7 +119,19 @@ export class MemoryService {
       ].slice(0, 10),
     };
 
-    writeFileSync(this.getMemoryPath(issue.repoFullName), JSON.stringify(next, null, 2), 'utf-8');
+    const targetPath = this.getMemoryPath(issue.repoFullName);
+    const tmpPath = `${targetPath}.tmp.${process.pid}`;
+    try {
+      writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf-8');
+      renameSync(tmpPath, targetPath);
+    } catch (error) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* ignore cleanup failure */
+      }
+      throw error;
+    }
     return next;
   }
 
@@ -184,7 +196,19 @@ export class MemoryService {
       ].slice(0, 10),
     };
 
-    writeFileSync(this.getMemoryPath(input.issue.repoFullName), JSON.stringify(next, null, 2), 'utf-8');
+    const targetPath = this.getMemoryPath(input.issue.repoFullName);
+    const tmpPath = `${targetPath}.tmp.${process.pid}`;
+    try {
+      writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf-8');
+      renameSync(tmpPath, targetPath);
+    } catch (error) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* ignore cleanup failure */
+      }
+      throw error;
+    }
     return next;
   }
 
