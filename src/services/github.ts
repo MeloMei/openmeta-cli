@@ -27,7 +27,7 @@ const MAX_SEARCH_PAGES = 4;
 const SEARCH_PAGE_PACING_DELAY_MS = 3_000;
 const RATE_LIMIT_RETRY_FALLBACK_DELAY_MS = 10_000;
 const MAX_ISSUES_PER_REPO = 5;
-const MIN_REPO_STARS = 10;
+const MIN_REPO_STARS = 50;
 
 type SearchIssueItem =
   RestEndpointMethodTypes['search']['issuesAndPullRequests']['response']['data']['items'][number];
