@@ -226,7 +226,7 @@ afterEach(() => {
 });
 
 describe('AgentOrchestrator support behavior', () => {
-  test('validateConfig allows explicitly skipping the LLM requirement', async () => {
+  test('validateConfig accepts local-only scout runs without an LLM key', async () => {
     const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
 
     await expect(
@@ -816,7 +816,7 @@ describe('AgentOrchestrator support behavior', () => {
     ).mockResolvedValue(undefined as never);
     spyOn(issueRankingService, 'loadRankedIssues').mockResolvedValue([]);
 
-    await orchestrator.scout();
+    await orchestrator.scout({ localOnly: true });
 
     expect(emptyStateSpy).toHaveBeenCalledWith(
       'OpenMeta Scout',
