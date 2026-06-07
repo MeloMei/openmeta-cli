@@ -3,6 +3,48 @@ import { schedulerService, SCORING_PRESETS, getPreset, normalizeWeights, normali
 import type { AppConfig, ScoringWeights, OverallWeights } from '../types/index.js';
 
 export class ConfigOrchestrator {
+  async getMachineSnapshot(): Promise<{
+    userProfile: AppConfig['userProfile'];
+    github: { username: string; pat: string; targetRepoPath?: string };
+    llm: {
+      provider: AppConfig['llm']['provider'];
+      apiBaseUrl: string;
+      apiKey: string;
+      modelName: string;
+      apiHeaders: Record<string, string>;
+      reasoningEffort?: AppConfig['llm']['reasoningEffort'];
+      stream?: boolean;
+      activeProfile?: string;
+      savedProfiles: string[];
+    };
+    automation: AppConfig['automation'];
+    commitTemplate: string;
+  }> {
+    const config = await configService.get();
+
+    return {
+      userProfile: config.userProfile,
+      github: {
+        username: config.github.username,
+        pat: ui.maskSecret(config.github.pat),
+        targetRepoPath: config.github.targetRepoPath,
+      },
+      llm: {
+        provider: config.llm.provider,
+        apiBaseUrl: config.llm.apiBaseUrl,
+        apiKey: ui.maskSecret(config.llm.apiKey),
+        modelName: config.llm.modelName,
+        apiHeaders: config.llm.apiHeaders ?? {},
+        reasoningEffort: config.llm.reasoningEffort,
+        stream: config.llm.stream,
+        activeProfile: config.llm.activeProfile,
+        savedProfiles: Object.keys(config.llm.profiles ?? {}).sort(),
+      },
+      automation: config.automation,
+      commitTemplate: config.commitTemplate,
+    };
+  }
+
   async view(): Promise<void> {
     const config = await configService.get();
     const missingRequired = [

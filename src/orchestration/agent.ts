@@ -477,8 +477,8 @@ export class AgentOrchestrator {
   }
 
   async showInbox(): Promise<void> {
-    const items = [...inboxService.load().items]
-      .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+    const result = await this.getInboxMachineResult();
+    const { items } = result;
 
     ui.hero({
       label: 'OpenMeta Inbox',
@@ -517,8 +517,8 @@ export class AgentOrchestrator {
   }
 
   async showProofOfWork(): Promise<void> {
-    const records = [...proofOfWorkService.load().records]
-      .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+    const result = await this.getProofOfWorkMachineResult();
+    const { records } = result;
 
     ui.hero({
       label: 'OpenMeta PoW',
@@ -555,6 +555,36 @@ export class AgentOrchestrator {
       ],
       tone: record.published ? 'success' : 'info',
     })));
+  }
+
+  async getInboxMachineResult(): Promise<{
+    items: ReturnType<typeof inboxService.load>['items'];
+    inboxPath: string;
+    nextActions: string[];
+  }> {
+    const items = [...inboxService.load().items]
+      .sort((left, right) => right.overallScore - left.overallScore);
+
+    return {
+      items,
+      inboxPath: inboxService.getPath(),
+      nextActions: items.length === 0 ? ['run_machine_scout'] : ['inspect_artifact_paths'],
+    };
+  }
+
+  async getProofOfWorkMachineResult(): Promise<{
+    records: ReturnType<typeof proofOfWorkService.load>['records'];
+    proofOfWorkPath: string;
+    nextActions: string[];
+  }> {
+    const records = [...proofOfWorkService.load().records]
+      .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+
+    return {
+      records,
+      proofOfWorkPath: proofOfWorkService.getPath(),
+      nextActions: records.length === 0 ? ['run_machine_agent'] : ['inspect_recent_publications'],
+    };
   }
 
   private renderAgentStage(

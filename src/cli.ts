@@ -8,6 +8,7 @@ import {
   registerDailyCommand,
   registerDoctorCommand,
   registerInboxCommand,
+  registerMachineCommand,
   registerInitCommand,
   registerPowCommand,
   registerProviderCommand,
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
   registerAutomationCommand(program);
   registerDoctorCommand(program);
   registerRunsCommand(program);
+  registerMachineCommand(program);
 
   program.on('command:*', () => {
     ui.commandFailed('openmeta', `Unknown command "${program.args.join(' ')}". Run "openmeta --help" to see available commands.`);
