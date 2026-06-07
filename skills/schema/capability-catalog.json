@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "openmeta machine doctor",
+      "requiredArgs": [],
+      "outcome": "machine_doctor_report"
+    },
+    {
+      "name": "openmeta machine config set",
+      "requiredArgs": ["key", "value"],
+      "outcome": "machine_config_snapshot"
+    },
+    {
+      "name": "openmeta machine provider add",
+      "requiredArgs": ["name", "--base-url", "--model", "--api-key"],
+      "outcome": "machine_provider_result"
+    },
+    {
+      "name": "openmeta machine provider use",
+      "requiredArgs": ["name"],
+      "outcome": "machine_provider_result"
+    },
+    {
+      "name": "openmeta machine scout",
+      "requiredArgs": [],
+      "outcome": "machine_scout_result"
+    },
+    {
+      "name": "openmeta machine analyze",
+      "requiredArgs": ["--repo"],
+      "outcome": "machine_analyze_result"
+    },
+    {
+      "name": "openmeta machine agent",
+      "requiredArgs": [],
+      "outcome": "machine_agent_result",
+      "dangerousExecutionNotes": [
+        "Only run when the user explicitly asks for execution.",
+        "Review executionOutcome, validationResults, and pullRequestUrl before claiming completion."
+      ]
+    }
+  ]
+}

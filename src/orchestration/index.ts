@@ -8,3 +8,4 @@ export { automationOrchestrator, AutomationOrchestrator } from './automation.js'
 export { doctorOrchestrator, DoctorOrchestrator } from './doctor.js';
 export { runsOrchestrator, RunsOrchestrator } from './runs.js';
 export * from './machine/index.js';
+export * from './skill/index.js';

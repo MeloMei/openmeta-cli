@@ -14,6 +14,7 @@ import {
   registerProviderCommand,
   registerRunsCommand,
   registerScoutCommand,
+  registerSkillCommand,
 } from './commands/index.js';
 import { getErrorMessage, ui } from './infra/index.js';
 
@@ -43,6 +44,7 @@ async function main(): Promise<void> {
   registerDoctorCommand(program);
   registerRunsCommand(program);
   registerMachineCommand(program);
+  registerSkillCommand(program);
 
   program.on('command:*', () => {
     ui.commandFailed('openmeta', `Unknown command "${program.args.join(' ')}". Run "openmeta --help" to see available commands.`);

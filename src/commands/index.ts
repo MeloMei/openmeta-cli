@@ -11,3 +11,4 @@ export { registerAutomationCommand } from './automation.js';
 export { registerDoctorCommand } from './doctor.js';
 export { registerRunsCommand } from './runs.js';
 export { registerMachineCommand } from './machine.js';
+export { registerSkillCommand } from './skill.js';
