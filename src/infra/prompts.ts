@@ -1,5 +1,6 @@
 import * as p from '@clack/prompts';
 import { UserCancelledError } from './errors.js';
+import { isMachineContext } from './execution-context.js';
 
 type PromptQuestion =
   | {
@@ -143,6 +144,10 @@ async function askQuestion(question: PromptQuestion): Promise<unknown> {
 }
 
 export async function prompt<T extends object>(questions: unknown): Promise<T> {
+  if (isMachineContext()) {
+    throw new Error('Interactive prompts are unavailable in machine mode. Use explicit machine command flags instead.');
+  }
+
   const questionList = questions as PromptQuestion[];
   const answers: Record<string, unknown> = {};
 

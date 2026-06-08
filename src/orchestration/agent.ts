@@ -57,6 +57,44 @@ export interface ScoutRunOptions {
   localOnly?: boolean;
 }
 
+export interface MachineScoutResult {
+  opportunities: RankedIssue[];
+  mode: {
+    limit: number;
+    refresh: boolean;
+    repo?: string;
+    localOnly: boolean;
+  };
+  nextActions: string[];
+}
+
+export interface MachineAgentResult {
+  issue: RankedIssue;
+  workspace: RepoWorkspaceContext;
+  patchDraft: PatchDraft;
+  prDraft: PullRequestDraft;
+  artifacts: ContributionAgentResult['artifacts'];
+  changedFiles: string[];
+  validationResults: TestResult[];
+  reviewRequired: boolean;
+  published: boolean;
+  prCreated: boolean;
+  repoMutated: boolean;
+  artifactsWritten: boolean;
+  executionOutcome: 'draft_only' | 'local_artifacts_written' | 'changes_applied' | 'pr_opened' | 'blocked';
+  executionPolicy: {
+    headless: boolean;
+    draftOnly: boolean;
+    runChecks: boolean;
+    dryRun: boolean;
+    refresh: boolean;
+  };
+  skipReasons: string[];
+  nextActions: string[];
+  pullRequestUrl?: string;
+  pullRequestNumber?: number;
+}
+
 interface TargetRepoContext {
   path: string;
   owner: string;
@@ -121,6 +159,223 @@ const AGENT_STAGES: Array<{ id: AgentStageId; label: string; description: string
 
 export class AgentOrchestrator {
   private octokit: Octokit | null = null;
+
+  async runMachine(options: AgentRunOptions = {}): Promise<MachineAgentResult> {
+    const config = await configService.get();
+    const headless = options.headless ?? true;
+    const schedulerRun = Boolean(options.schedulerRun);
+    const runChecks = typeof options.runChecks === 'boolean' ? options.runChecks : !headless;
+    const draftOnly = Boolean(options.draftOnly);
+    const refresh = Boolean(options.refresh);
+    const dryRun = Boolean(options.dryRun);
+    const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
+    const repoFullName = issueTarget?.repoFullName ?? (options.repo ? parseGitHubRepoFullName(options.repo) : undefined);
+
+    await this.validateConfig(config);
+
+    if (headless && !schedulerRun && !dryRun) {
+      await this.confirmManualHeadlessRun(config);
+    }
+
+    await this.initializeClients(config);
+
+    const rankedIssues = issueTarget
+      ? await issueRankingService.loadTargetIssue(config, issueTarget)
+      : await issueRankingService.loadRankedIssues(config, {
+        refresh,
+        repoFullName,
+      });
+
+    if (rankedIssues.length === 0) {
+      throw new Error(issueTarget
+        ? 'OpenMeta could not build a contribution target from the specified issue.'
+        : 'No issues met the current technical match threshold. Broaden your profile or try again later.');
+    }
+
+    const selectedIssue = issueTarget
+      ? rankedIssues[0]
+      : headless
+        ? issueRankingService.selectIssueForAutomation(rankedIssues, config.automation.minMatchScore)
+        : await this.promptForIssue(issueRankingService.diversifyScoutIssues(rankedIssues, 5));
+
+    if (!selectedIssue) {
+      throw new Error(issueTarget
+        ? 'OpenMeta could not select the specified target issue after scoring.'
+        : `Top opportunities were below ${config.automation.minMatchScore}/100. Lower the threshold or widen your profile.`);
+    }
+
+    const memoryBeforeRun = memoryService.load(selectedIssue.repoFullName);
+    const workspace = await workspaceService.prepareWorkspace(
+      selectedIssue,
+      memoryBeforeRun,
+      runChecks,
+      headless ? 'headless' : 'interactive',
+    );
+    const memory = memoryService.update(selectedIssue, workspace);
+
+    const patchDraftResult = await llmService.generatePatchDraft(selectedIssue, workspace, memory);
+    const patchDraft = patchDraftResult.data;
+    const implementationWorkspace = this.buildImplementationWorkspace(workspace, patchDraft);
+    const implementation = patchDraftResult.status === 'success'
+      ? await this.generateConcretePatch(selectedIssue, implementationWorkspace, patchDraft, runChecks, draftOnly)
+      : {
+        changedFiles: [],
+        validationResults: implementationWorkspace.testResults,
+        reviewRequired: true,
+      };
+
+    const workspaceForArtifacts: RepoWorkspaceContext = {
+      ...implementationWorkspace,
+      testResults: implementation.validationResults,
+    };
+
+    const prDraftResult = await llmService.generatePrDraft(selectedIssue, patchDraft, workspaceForArtifacts);
+    const prDraft = prDraftResult.data;
+    const patchDraftMarkdown = contentService.formatPatchDraftMarkdown(patchDraft);
+    const prDraftMarkdown = contentService.formatPullRequestDraftMarkdown(prDraft);
+
+    const contributionPullRequest = await this.submitContributionPullRequestIfPossible({
+      config,
+      allowRealPr: patchDraftResult.status === 'success' && prDraftResult.status === 'success',
+      headless,
+      issue: selectedIssue,
+      prDraft,
+      workspace: workspaceForArtifacts,
+      changedFiles: implementation.changedFiles,
+      validationResults: implementation.validationResults,
+    });
+
+    const artifacts = this.prepareLocalArtifactPaths(selectedIssue);
+    const reviewRequired =
+      patchDraftResult.status !== 'success'
+      || implementation.reviewRequired
+      || prDraftResult.status !== 'success';
+    const skipReasons = [
+      ...(draftOnly ? ['draft_only'] : []),
+      ...(patchDraftResult.status !== 'success' ? ['patch_draft_requires_review'] : []),
+      ...(implementation.reviewRequired ? ['implementation_requires_review'] : []),
+      ...(prDraftResult.status !== 'success' ? ['pr_draft_requires_review'] : []),
+      ...(contributionPullRequest.url ? [] : implementation.changedFiles.length > 0 ? ['pr_not_created'] : ['no_changes_applied']),
+    ];
+
+    if (!dryRun) {
+      const inboxItem = {
+        id: `${selectedIssue.repoFullName}#${selectedIssue.number}`,
+        repoFullName: selectedIssue.repoFullName,
+        issueNumber: selectedIssue.number,
+        issueTitle: selectedIssue.title,
+        summary: selectedIssue.opportunity.summary,
+        overallScore: selectedIssue.opportunity.overallScore,
+        opportunityScore: selectedIssue.opportunity.score,
+        status: 'ready' as const,
+        artifactDir: artifacts.artifactDir,
+        generatedAt: new Date().toISOString(),
+      };
+      const inboxItems = inboxService.saveItem(inboxItem);
+      const proofRecord = {
+        id: `${selectedIssue.repoFullName}#${selectedIssue.number}@${Date.now()}`,
+        repoFullName: selectedIssue.repoFullName,
+        issueNumber: selectedIssue.number,
+        issueTitle: selectedIssue.title,
+        overallScore: selectedIssue.opportunity.overallScore,
+        opportunityScore: selectedIssue.opportunity.score,
+        branchName: workspace.branchName,
+        artifactDir: artifacts.artifactDir,
+        generatedAt: new Date().toISOString(),
+        published: false,
+        pullRequestUrl: contributionPullRequest.url,
+        pullRequestNumber: contributionPullRequest.number,
+      };
+      const dossier = contentService.formatContributionDossier(selectedIssue, workspaceForArtifacts, memory, patchDraft, prDraft);
+      const proofMarkdown = proofOfWorkService.renderMarkdown([
+        proofRecord,
+        ...proofOfWorkService.load().records,
+      ].slice(0, 100));
+
+      this.writeLocalArtifacts({
+        artifacts,
+        dossier,
+        patchDraftMarkdown,
+        prDraftMarkdown,
+        memoryMarkdown: memoryService.renderMarkdown(memory),
+        inboxMarkdown: inboxService.renderMarkdown(inboxItems),
+        proofMarkdown,
+      });
+
+      const publishResult = await this.publishArtifactsIfNeeded({
+        config,
+        headless,
+        dryRun: options.dryRun,
+        issue: selectedIssue,
+        patchDraftMarkdown,
+        prDraftMarkdown,
+        dossier,
+        memoryMarkdown: memoryService.renderMarkdown(memory),
+        inboxMarkdown: inboxService.renderMarkdown(inboxItems),
+        proofMarkdown,
+        changedFiles: implementation.changedFiles,
+        validationResults: implementation.validationResults,
+        pullRequestUrl: contributionPullRequest.url,
+      });
+
+      const finalProofRecord = {
+        ...proofRecord,
+        published: publishResult.published,
+      };
+      const finalMemory = memoryService.recordOutcome({
+        issue: selectedIssue,
+        workspace: workspaceForArtifacts,
+        changedFiles: implementation.changedFiles,
+        validationResults: implementation.validationResults,
+        published: publishResult.published,
+        pullRequestUrl: contributionPullRequest.url,
+        reviewRequired,
+      });
+      proofOfWorkService.record(finalProofRecord);
+      const finalProofMarkdown = proofOfWorkService.renderMarkdown(proofOfWorkService.load().records);
+      this.writeLocalArtifacts({
+        artifacts,
+        dossier,
+        patchDraftMarkdown,
+        prDraftMarkdown,
+        memoryMarkdown: memoryService.renderMarkdown(finalMemory),
+        inboxMarkdown: inboxService.renderMarkdown(inboxItems),
+        proofMarkdown: finalProofMarkdown,
+      });
+    }
+
+    return {
+      issue: selectedIssue,
+      workspace: workspaceForArtifacts,
+      patchDraft,
+      prDraft,
+      artifacts,
+      changedFiles: implementation.changedFiles,
+      validationResults: implementation.validationResults,
+      reviewRequired,
+      published: false,
+      prCreated: Boolean(contributionPullRequest.url),
+      repoMutated: implementation.changedFiles.length > 0,
+      artifactsWritten: !dryRun,
+      executionOutcome: this.resolveMachineExecutionOutcome({
+        draftOnly,
+        changedFiles: implementation.changedFiles,
+        prCreated: Boolean(contributionPullRequest.url),
+        reviewRequired,
+      }),
+      executionPolicy: {
+        headless,
+        draftOnly,
+        runChecks,
+        dryRun,
+        refresh,
+      },
+      skipReasons: [...new Set(skipReasons)],
+      nextActions: dryRun ? ['inspect_artifact_paths'] : contributionPullRequest.url ? ['review_pull_request'] : ['inspect_artifact_paths'],
+      pullRequestUrl: contributionPullRequest.url,
+      pullRequestNumber: contributionPullRequest.number,
+    };
+  }
 
   async run(options: AgentRunOptions = {}): Promise<void> {
     const config = await configService.get();
@@ -476,9 +731,37 @@ export class AgentOrchestrator {
     this.renderOpportunityList('Ranked opportunities', issueRankingService.diversifyScoutIssues(rankedIssues, limit));
   }
 
+  async scoutMachine(options: ScoutRunOptions = {}): Promise<MachineScoutResult> {
+    const limit = options.limit ?? 10;
+    const refresh = Boolean(options.refresh);
+    const repoFullName = options.repo ? parseGitHubRepoFullName(options.repo) : undefined;
+    const localOnly = Boolean(options.localOnly);
+    const config = await configService.get();
+
+    await this.validateConfig(config, { requireLlm: !localOnly });
+    await this.initializeClients(config, { validateLlm: !localOnly });
+
+    const rankedIssues = await issueRankingService.loadRankedIssues(config, {
+      refresh,
+      repoFullName,
+      localOnly,
+    });
+
+    return {
+      opportunities: issueRankingService.diversifyScoutIssues(rankedIssues, limit),
+      mode: {
+        limit,
+        refresh,
+        repo: repoFullName,
+        localOnly,
+      },
+      nextActions: rankedIssues.length === 0 ? ['broaden_profile_filters'] : ['inspect_ranked_opportunities'],
+    };
+  }
+
   async showInbox(): Promise<void> {
-    const items = [...inboxService.load().items]
-      .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+    const result = await this.getInboxMachineResult();
+    const { items } = result;
 
     ui.hero({
       label: 'OpenMeta Inbox',
@@ -517,8 +800,8 @@ export class AgentOrchestrator {
   }
 
   async showProofOfWork(): Promise<void> {
-    const records = [...proofOfWorkService.load().records]
-      .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+    const result = await this.getProofOfWorkMachineResult();
+    const { records } = result;
 
     ui.hero({
       label: 'OpenMeta PoW',
@@ -555,6 +838,36 @@ export class AgentOrchestrator {
       ],
       tone: record.published ? 'success' : 'info',
     })));
+  }
+
+  async getInboxMachineResult(): Promise<{
+    items: ReturnType<typeof inboxService.load>['items'];
+    inboxPath: string;
+    nextActions: string[];
+  }> {
+    const items = [...inboxService.load().items]
+      .sort((left, right) => right.overallScore - left.overallScore);
+
+    return {
+      items,
+      inboxPath: inboxService.getPath(),
+      nextActions: items.length === 0 ? ['run_machine_scout'] : ['inspect_artifact_paths'],
+    };
+  }
+
+  async getProofOfWorkMachineResult(): Promise<{
+    records: ReturnType<typeof proofOfWorkService.load>['records'];
+    proofOfWorkPath: string;
+    nextActions: string[];
+  }> {
+    const records = [...proofOfWorkService.load().records]
+      .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+
+    return {
+      records,
+      proofOfWorkPath: proofOfWorkService.getPath(),
+      nextActions: records.length === 0 ? ['run_machine_agent'] : ['inspect_recent_publications'],
+    };
   }
 
   private renderAgentStage(
@@ -1469,6 +1782,31 @@ export class AgentOrchestrator {
 
   private hasBlockingValidationFailures(results: TestResult[]): boolean {
     return results.some((result) => !result.passed && !this.isInfrastructureValidationFailure(result));
+  }
+
+  private resolveMachineExecutionOutcome(input: {
+    draftOnly: boolean;
+    changedFiles: string[];
+    prCreated: boolean;
+    reviewRequired: boolean;
+  }): MachineAgentResult['executionOutcome'] {
+    if (input.reviewRequired && input.changedFiles.length === 0 && !input.prCreated) {
+      return 'blocked';
+    }
+
+    if (input.draftOnly) {
+      return 'draft_only';
+    }
+
+    if (input.prCreated) {
+      return 'pr_opened';
+    }
+
+    if (input.changedFiles.length > 0) {
+      return 'changes_applied';
+    }
+
+    return 'local_artifacts_written';
   }
 
   private isInfrastructureValidationFailure(result: TestResult): boolean {

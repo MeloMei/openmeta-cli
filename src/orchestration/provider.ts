@@ -18,6 +18,20 @@ interface ProviderUseOptions {
   validate?: boolean;
 }
 
+interface ProviderUseResult {
+  profileName: string;
+  activeProfile: string;
+  provider: LLMProvider;
+  modelName: string;
+  apiBaseUrl: string;
+  apiKey: string;
+  apiHeaders: Record<string, string>;
+  reasoningEffort?: LLMReasoningEffort;
+  stream?: boolean;
+  validation: 'skipped' | 'passed' | 'failed';
+  validationMessage: string;
+}
+
 function parseHeaders(values: string[] = []): Record<string, string> {
   const headers: Record<string, string> = {};
 
@@ -84,6 +98,37 @@ function parseBooleanOption(value: string | undefined, label: string): boolean {
 }
 
 export class ProviderOrchestrator {
+  async addProfile(nameInput: string, options: ProviderAddOptions): Promise<ProviderUseResult> {
+    const name = this.normalizeProfileName(nameInput);
+    const config = await configService.get();
+    const profile: LLMProviderProfile = {
+      provider: parseProvider(options.provider),
+      apiBaseUrl: requireValue(options.baseUrl, 'base URL'),
+      modelName: requireValue(options.model, 'model'),
+      apiKey: requireValue(options.apiKey, 'API key'),
+      apiHeaders: parseHeaders(options.header?.filter(Boolean) ?? []),
+      reasoningEffort: options.reasoningEffort
+        ? parseLLMReasoningEffort(options.reasoningEffort)
+        : DEFAULT_LLM_REASONING_EFFORT,
+      stream: parseBooleanOption(options.stream, 'stream'),
+    };
+    const updated = await this.saveProfile(config, name, profile, config.llm.activeProfile);
+
+    return {
+      profileName: name,
+      activeProfile: updated.llm.activeProfile || '',
+      provider: profile.provider,
+      modelName: profile.modelName,
+      apiBaseUrl: profile.apiBaseUrl,
+      apiKey: ui.maskSecret(profile.apiKey),
+      apiHeaders: profile.apiHeaders ?? {},
+      reasoningEffort: profile.reasoningEffort,
+      stream: profile.stream,
+      validation: 'skipped',
+      validationMessage: 'Validation skipped.',
+    };
+  }
+
   async list(): Promise<void> {
     const config = await configService.get();
     const profiles = config.llm.profiles || {};
@@ -150,33 +195,20 @@ export class ProviderOrchestrator {
   }
 
   async add(nameInput: string, options: ProviderAddOptions): Promise<void> {
-    const name = this.normalizeProfileName(nameInput);
-    const config = await configService.get();
-    const profile: LLMProviderProfile = {
-      provider: parseProvider(options.provider),
-      apiBaseUrl: requireValue(options.baseUrl, 'base URL'),
-      modelName: requireValue(options.model, 'model'),
-      apiKey: requireValue(options.apiKey, 'API key'),
-      apiHeaders: parseHeaders(options.header?.filter(Boolean) ?? []),
-      reasoningEffort: options.reasoningEffort
-        ? parseLLMReasoningEffort(options.reasoningEffort)
-        : DEFAULT_LLM_REASONING_EFFORT,
-      stream: parseBooleanOption(options.stream, 'stream'),
-    };
-    const updated = await this.saveProfile(config, name, profile, config.llm.activeProfile);
+    const result = await this.addProfile(nameInput, options);
 
     ui.card({
       label: 'OpenMeta Provider',
       title: 'Provider profile saved',
       subtitle: options.validate ? 'The profile was saved. Run provider use to activate and validate it.' : 'The profile is available for fast switching.',
       lines: [
-        `Profile: ${name}`,
-        `Provider: ${profile.provider}`,
-        `Model: ${profile.modelName}`,
-        `Reasoning effort: ${profile.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
-        `Streaming: ${profile.stream ? 'yes' : 'no'}`,
-        `Endpoint: ${profile.apiBaseUrl}`,
-        `Active profile: ${updated.llm.activeProfile || '(none)'}`,
+        `Profile: ${result.profileName}`,
+        `Provider: ${result.provider}`,
+        `Model: ${result.modelName}`,
+        `Reasoning effort: ${result.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
+        `Streaming: ${result.stream ? 'yes' : 'no'}`,
+        `Endpoint: ${result.apiBaseUrl}`,
+        `Active profile: ${result.activeProfile || '(none)'}`,
       ],
       tone: 'success',
     });
@@ -354,6 +386,27 @@ export class ProviderOrchestrator {
   }
 
   async use(nameInput: string, options: ProviderUseOptions = {}): Promise<void> {
+    const result = await this.useProfile(nameInput, options);
+    const tone: 'success' | 'warning' = result.validation === 'failed' ? 'warning' : 'success';
+
+    ui.card({
+      label: 'OpenMeta Provider',
+      title: 'Active provider switched',
+      subtitle: 'OpenMeta will use this LLM backend for the next agent or scout run.',
+      lines: [
+        `Profile: ${result.profileName}`,
+        `Provider: ${result.provider}`,
+        `Model: ${result.modelName}`,
+        `Reasoning effort: ${result.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
+        `Streaming: ${result.stream ? 'yes' : 'no'}`,
+        `Endpoint: ${result.apiBaseUrl}`,
+        result.validationMessage,
+      ],
+      tone,
+    });
+  }
+
+  async useProfile(nameInput: string, options: ProviderUseOptions = {}): Promise<ProviderUseResult> {
     const name = this.normalizeProfileName(nameInput);
     const config = await configService.get();
     const profile = config.llm.profiles?.[name];
@@ -373,31 +426,29 @@ export class ProviderOrchestrator {
       },
     });
 
-    let validationDetail = 'Validation skipped.';
-    let tone: 'success' | 'warning' = 'success';
+    let validation: 'skipped' | 'passed' | 'failed' = 'skipped';
+    let validationMessage = 'Validation skipped.';
     if (options.validate) {
       const valid = await this.validateProfile(profile);
-      validationDetail = valid
+      validation = valid ? 'passed' : 'failed';
+      validationMessage = valid
         ? 'Provider validation succeeded.'
         : `Provider validation failed: ${llmService.getLastValidationError() || 'unknown reason'}`;
-      tone = valid ? 'success' : 'warning';
     }
 
-    ui.card({
-      label: 'OpenMeta Provider',
-      title: 'Active provider switched',
-      subtitle: 'OpenMeta will use this LLM backend for the next agent or scout run.',
-      lines: [
-        `Profile: ${name}`,
-        `Provider: ${updated.llm.provider}`,
-        `Model: ${updated.llm.modelName}`,
-        `Reasoning effort: ${updated.llm.reasoningEffort || DEFAULT_LLM_REASONING_EFFORT}`,
-        `Streaming: ${updated.llm.stream ? 'yes' : 'no'}`,
-        `Endpoint: ${updated.llm.apiBaseUrl}`,
-        validationDetail,
-      ],
-      tone,
-    });
+    return {
+      profileName: name,
+      activeProfile: updated.llm.activeProfile || '',
+      provider: updated.llm.provider,
+      modelName: updated.llm.modelName,
+      apiBaseUrl: updated.llm.apiBaseUrl,
+      apiKey: ui.maskSecret(updated.llm.apiKey),
+      apiHeaders: updated.llm.apiHeaders ?? {},
+      reasoningEffort: updated.llm.reasoningEffort,
+      stream: updated.llm.stream,
+      validation,
+      validationMessage,
+    };
   }
 
   async remove(nameInput: string): Promise<void> {

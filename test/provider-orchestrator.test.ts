@@ -170,4 +170,42 @@ describe('ProviderOrchestrator', () => {
     expect(loaded.llm.activeProfile).toBe('');
     expect(loaded.llm.modelName).toBe('temporary-model');
   });
+
+  test('returns provider result data when switching profiles', async () => {
+    const orchestrator = new ProviderOrchestrator();
+
+    await orchestrator.add('machine-profile', {
+      provider: 'custom',
+      baseUrl: 'https://example.com/v1',
+      model: 'example-model',
+      apiKey: 'sk-machine-secret',
+    });
+
+    const result = await orchestrator.useProfile('machine-profile');
+
+    expect(result.profileName).toBe('machine-profile');
+    expect(result.activeProfile).toBe('machine-profile');
+    expect(result.apiKey).toBe('***cret');
+    expect(result.validation).toBe('skipped');
+  });
+
+  test('returns provider result data when adding a profile for machine flows', async () => {
+    const orchestrator = new ProviderOrchestrator();
+
+    const result = await orchestrator.addProfile('machine-add', {
+      provider: 'custom',
+      baseUrl: 'https://example.com/v1',
+      model: 'example-model',
+      apiKey: 'sk-machine-add-secret',
+      reasoningEffort: 'medium',
+      stream: 'true',
+      header: ['X-Test=yes'],
+    });
+
+    expect(result.profileName).toBe('machine-add');
+    expect(result.activeProfile).toBe('');
+    expect(result.apiKey).toBe('***cret');
+    expect(result.apiHeaders).toEqual({ 'X-Test': 'yes' });
+    expect(result.stream).toBe(true);
+  });
 });

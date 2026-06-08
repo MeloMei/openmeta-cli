@@ -73,4 +73,29 @@ describe('ConfigOrchestrator', () => {
       'llm.stream must be a boolean value.',
     );
   });
+
+  test('returns a masked machine config snapshot', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('github.pat', 'ghp_new_secret');
+    await orchestrator.set('llm.apiKey', 'sk-new-secret');
+
+    const snapshot = await orchestrator.getMachineSnapshot();
+
+    expect(snapshot.github.pat).toBe('***cret');
+    expect(snapshot.llm.apiKey).toBe('***cret');
+    expect(snapshot.llm.modelName).toBe('gpt-4o-mini');
+    expect(snapshot.llm.savedProfiles).toEqual([]);
+  });
+
+  test('returns machine config set results with masked secret values', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    const result = await orchestrator.setMachineValue('llm.apiKey', 'sk-machine-secret');
+
+    expect(result.updatedKey).toBe('llm.apiKey');
+    expect(result.appliedValue).toBe('***cret');
+    expect(result.snapshot.llm.apiKey).toBe('***cret');
+    expect(result.scheduler.status).toBe('unchanged');
+  });
 });

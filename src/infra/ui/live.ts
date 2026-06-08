@@ -1,6 +1,7 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import figures from 'figures';
+import { isMachineContext } from '../execution-context.js';
 import type { TaskController, TaskOptions, Tone, UiCapabilities } from './types.js';
 
 function toneColor(tone: Tone): 'green' | 'yellow' | 'red' | 'magenta' | 'white' | 'cyan' {
@@ -52,6 +53,10 @@ export async function runTask<T>(
       // no-op by default; interactive mode replaces this with spinner.message(...)
     },
   };
+
+  if (isMachineContext()) {
+    return task(controller);
+  }
 
   if (!capabilities.isInteractive || capabilities.mode === 'plain') {
     process.stdout.write(`${renderInlineStatus(figures.pointerSmall, options.title, tone)}\n`);

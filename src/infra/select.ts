@@ -1,5 +1,6 @@
 import * as p from '@clack/prompts';
 import { UserCancelledError } from './errors.js';
+import { isMachineContext } from './execution-context.js';
 
 export interface SelectChoice<T> {
   name: string;
@@ -14,6 +15,10 @@ export async function selectPrompt<T>(options: {
   default?: T;
   pageSize?: number;
 }): Promise<T> {
+  if (isMachineContext()) {
+    throw new Error(`Interactive selection is unavailable in machine mode. ${options.message}`);
+  }
+
   const mappedOptions = options.choices.map((choice) => ({
     value: choice.value,
     label: choice.name,

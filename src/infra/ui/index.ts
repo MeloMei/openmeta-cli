@@ -3,6 +3,7 @@ import boxen from 'boxen';
 import chalk from 'chalk';
 import figures from 'figures';
 import gradient from 'gradient-string';
+import { isMachineContext } from '../execution-context.js';
 import { getOpenMetaWordmarkLines } from './brand.js';
 import { getUiCapabilities } from './capabilities.js';
 import { padLine, visibleLength, wrapLine } from './layout.js';
@@ -104,10 +105,16 @@ function statusColor(state: StepState): (text: string) => string {
 }
 
 function printBlankLine(): void {
+  if (isMachineContext()) {
+    return;
+  }
   process.stdout.write('\n');
 }
 
 function clackLines(lines: string | string[]): void {
+  if (isMachineContext()) {
+    return;
+  }
   p.log.message(lines, {
     symbol: ' ',
     withGuide: false,
@@ -189,6 +196,9 @@ function buildCardText(capabilities: UiCapabilities, options: CardOptions, varia
 }
 
 function printCard(capabilities: UiCapabilities, options: CardOptions, variant: CardVariant = 'standard'): void {
+  if (isMachineContext()) {
+    return;
+  }
   const tone = options.tone ?? 'info';
   const palette = paletteForTone(tone);
   const content = buildCardText(capabilities, options, variant);
@@ -206,6 +216,9 @@ function printCard(capabilities: UiCapabilities, options: CardOptions, variant: 
 }
 
 function printHero(capabilities: UiCapabilities, options: CardOptions): void {
+  if (isMachineContext()) {
+    return;
+  }
   const tone = options.tone ?? 'accent';
   const width = Math.max(40, Math.min(capabilities.width - 2, 96));
   const bullet = figures.pointerSmall;
@@ -235,6 +248,9 @@ function printHero(capabilities: UiCapabilities, options: CardOptions): void {
 }
 
 function printCelebration(capabilities: UiCapabilities, options: CardOptions): void {
+  if (isMachineContext()) {
+    return;
+  }
   const tone = options.tone ?? 'success';
   const width = Math.max(40, Math.min(capabilities.width - 2, 96));
   const rule = renderRule(capabilities, tone, Math.min(width, 42));
@@ -267,6 +283,9 @@ function printCelebration(capabilities: UiCapabilities, options: CardOptions): v
 }
 
 function printSection(capabilities: UiCapabilities, title: string, subtitle?: string): void {
+  if (isMachineContext()) {
+    return;
+  }
   const width = Math.max(44, Math.min(capabilities.width - 2, 106));
   const rule = capabilities.supportsUnicode ? '─'.repeat(Math.max(10, width - visibleLength(title) - 6)) : '-'.repeat(Math.max(10, width - visibleLength(title) - 6));
 
@@ -280,6 +299,9 @@ function printSection(capabilities: UiCapabilities, title: string, subtitle?: st
 }
 
 function printList(lines: string[], tone: Tone = 'muted'): void {
+  if (isMachineContext()) {
+    return;
+  }
   const accent = paletteForTone(tone).accent;
   for (const line of lines) {
     process.stdout.write(`${accent(figures.pointerSmall)} ${chalk.gray(line)}\n`);
@@ -287,6 +309,9 @@ function printList(lines: string[], tone: Tone = 'muted'): void {
 }
 
 function printKeyValues(capabilities: UiCapabilities, title: string, items: KeyValueItem[]): void {
+  if (isMachineContext()) {
+    return;
+  }
   const width = Math.max(44, Math.min(capabilities.width - 2, 106));
   const labelWidth = Math.min(24, Math.max(...items.map((item) => item.label.length), 12));
   printSection(capabilities, title);
@@ -305,6 +330,9 @@ function printKeyValues(capabilities: UiCapabilities, title: string, items: KeyV
 }
 
 function printStats(capabilities: UiCapabilities, title: string, items: MetricItem[]): void {
+  if (isMachineContext()) {
+    return;
+  }
   printSection(capabilities, title);
   const columns = capabilities.mode === 'interactive-rich' && capabilities.width >= 96 ? 3 : 2;
   const width = Math.max(44, Math.min(capabilities.width - 2, 106));
@@ -335,6 +363,9 @@ function printStats(capabilities: UiCapabilities, title: string, items: MetricIt
 }
 
 function printStepper(capabilities: UiCapabilities, title: string, steps: StepItem[]): void {
+  if (isMachineContext()) {
+    return;
+  }
   printSection(capabilities, title);
 
   for (const [index, step] of steps.entries()) {
@@ -351,6 +382,9 @@ function printStepper(capabilities: UiCapabilities, title: string, steps: StepIt
 }
 
 function printTimeline(capabilities: UiCapabilities, title: string, items: TimelineItem[]): void {
+  if (isMachineContext()) {
+    return;
+  }
   printSection(capabilities, title);
 
   for (const item of items) {
@@ -365,6 +399,9 @@ function printTimeline(capabilities: UiCapabilities, title: string, items: Timel
 }
 
 function printRecordList(capabilities: UiCapabilities, title: string, items: RecordItem[]): void {
+  if (isMachineContext()) {
+    return;
+  }
   printSection(capabilities, title);
 
   for (const item of items) {

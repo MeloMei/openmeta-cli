@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { isMachineContext } from './execution-context.js';
 
 export type LogLevel = 'info' | 'success' | 'warn' | 'error' | 'debug';
 
@@ -31,7 +32,16 @@ export class Logger {
       .map((arg) => this.renderArg(arg))
       .filter((arg): arg is string => arg.length > 0);
 
-    console.log(`${chalk.gray(timestamp)} ${format[level]} ${prefix}${message}`, ...renderedArgs);
+    const line = [`${chalk.gray(timestamp)} ${format[level]} ${prefix}${message}`, ...renderedArgs]
+      .filter(Boolean)
+      .join(' ');
+
+    if (isMachineContext()) {
+      process.stderr.write(`${line}\n`);
+      return;
+    }
+
+    console.log(line);
   }
 
   info(message: string, ...args: unknown[]): void {

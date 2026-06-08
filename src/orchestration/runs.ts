@@ -27,26 +27,56 @@ function statusTone(status: AgentRunStatus): 'success' | 'warning' | 'error' | '
 }
 
 export class RunsOrchestrator {
-  async list(options: RunsListOptions = {}): Promise<void> {
+  async listMachine(options: RunsListOptions = {}): Promise<{
+    records: ReturnType<typeof runHistoryService.load>['records'];
+    totals: Record<AgentRunStatus, number>;
+    ledgerPath: string;
+  }> {
     const limit = Math.max(1, options.limit ?? 10);
-    const records = runHistoryService.load().records.slice(0, limit);
+    const state = runHistoryService.load();
+    const records = state.records.slice(0, limit);
+    const totals = state.records.reduce<Record<AgentRunStatus, number>>((acc, record) => {
+      acc[record.status] += 1;
+      return acc;
+    }, { running: 0, success: 0, failed: 0, cancelled: 0 });
+
+    return {
+      records,
+      totals,
+      ledgerPath: runHistoryService.getPath(),
+    };
+  }
+
+  async showMachine(id: string): Promise<{
+    record: NonNullable<ReturnType<typeof runHistoryService.find>>;
+    ledgerPath: string;
+  }> {
+    const record = runHistoryService.find(id);
+
+    if (!record) {
+      throw new Error(`Run not found: ${id}`);
+    }
+
+    return {
+      record,
+      ledgerPath: runHistoryService.getPath(),
+    };
+  }
+
+  async list(options: RunsListOptions = {}): Promise<void> {
+    const { records, totals, ledgerPath } = await this.listMachine(options);
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify(records, null, 2)}\n`);
       return;
     }
 
-    const totals = runHistoryService.load().records.reduce<Record<AgentRunStatus, number>>((acc, record) => {
-      acc[record.status] += 1;
-      return acc;
-    }, { running: 0, success: 0, failed: 0, cancelled: 0 });
-
     ui.hero({
       label: 'OpenMeta Runs',
       title: records.length > 0 ? 'The agent now leaves footprints you can inspect' : 'No run history has been recorded yet',
       subtitle: 'Recent command runs, durations, and failure reasons stay in a local ledger for debugging and follow-up.',
       lines: [
-        `Run history path: ${runHistoryService.getPath()}`,
+        `Run history path: ${ledgerPath}`,
         `Showing latest ${records.length} run(s).`,
       ],
       tone: records.some((record) => record.status === 'failed') ? 'warning' : 'accent',
@@ -80,11 +110,7 @@ export class RunsOrchestrator {
   }
 
   async show(id: string, options: { json?: boolean } = {}): Promise<void> {
-    const record = runHistoryService.find(id);
-
-    if (!record) {
-      throw new Error(`Run not found: ${id}`);
-    }
+    const { record, ledgerPath } = await this.showMachine(id);
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
@@ -108,7 +134,7 @@ export class RunsOrchestrator {
       { label: 'Command', value: record.commandName, tone: 'info' },
       { label: 'Args', value: record.args.join(' ') || '(none)', tone: 'info' },
       { label: 'Error', value: record.error || '(none)', tone: record.error ? 'error' : 'muted' },
-      { label: 'Ledger', value: runHistoryService.getPath(), tone: 'muted' },
+      { label: 'Ledger', value: ledgerPath, tone: 'muted' },
     ]);
   }
 }
