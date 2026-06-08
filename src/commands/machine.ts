@@ -93,10 +93,11 @@ export function registerMachineCommand(program: Command): void {
     .command('analyze')
     .description('Machine-safe repository-first analysis')
     .requiredOption('--repo <repository>', 'GitHub repository URL or owner/name to analyze')
+    .option('--repo-path <path>', 'Reuse a local repository path via an isolated worktree')
     .option('--headless', 'Select the highest-scoring suggestion without prompting')
     .option('--run-checks', 'Execute detected baseline validation commands during workspace preparation')
     .option('--dry-run', 'Preview artifact paths without writing local analysis files')
-    .action((options: { repo?: string; headless?: boolean; runChecks?: boolean; dryRun?: boolean }) => machineAnalyzeOrchestrator.execute(options));
+    .action((options: { repo?: string; repoPath?: string; headless?: boolean; runChecks?: boolean; dryRun?: boolean }) => machineAnalyzeOrchestrator.execute(options));
 
   machine
     .command('agent')
@@ -106,6 +107,7 @@ export function registerMachineCommand(program: Command): void {
     .option('--draft-only', 'Generate artifacts without applying file edits or opening a PR')
     .option('--refresh', 'Ignore cached GitHub issue discovery results')
     .option('--repo <repository>', 'Limit issue discovery to one repository')
+    .option('--repo-path <path>', 'Reuse a local repository path via an isolated worktree')
     .option('--issue <issue>', 'Solve one GitHub issue number or issue URL')
     .option('--dry-run', 'Preview artifacts without publishing them')
     .action((options: {
@@ -114,6 +116,7 @@ export function registerMachineCommand(program: Command): void {
       draftOnly?: boolean;
       refresh?: boolean;
       repo?: string;
+      repoPath?: string;
       issue?: string;
       dryRun?: boolean;
     }) => machineAgentFlowOrchestrator.execute(options));

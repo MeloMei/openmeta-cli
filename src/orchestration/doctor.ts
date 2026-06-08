@@ -9,7 +9,7 @@ import {
   getOpenMetaWorkspaceRoot,
   ui,
 } from '../infra/index.js';
-import { schedulerService } from '../services/index.js';
+import { inspectBinaryOnPath, schedulerService, type BinaryResolution } from '../services/index.js';
 import type { AppConfig } from '../types/index.js';
 
 export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
@@ -26,6 +26,7 @@ export interface DoctorCheck {
 export interface DoctorReport {
   configPath: string;
   homePath: string;
+  openmetaBinary: BinaryResolution;
   checks: DoctorCheck[];
   totals: Record<DoctorCheckStatus, number>;
   ready: boolean;
@@ -73,12 +74,14 @@ export class DoctorOrchestrator {
     const resolvedConfig = config ?? await configService.get();
     const configPath = configService.getConfigPath();
     const homePath = getOpenMetaHomePath();
+    const openmetaBinary = inspectBinaryOnPath('openmeta');
     const checks = [
       this.checkConfigFile(configPath),
       this.checkDirectory('state-dir', 'State directory', dirname(configPath), 'Run "openmeta init" to create and save local configuration.'),
       this.checkDirectory('openmeta-home', 'OpenMeta home', homePath, 'Run "openmeta agent" or create the directory manually with write permissions.'),
       this.checkDirectory('workspace-root', 'Workspace root', getOpenMetaWorkspaceRoot(), 'Run "openmeta agent" after configuration is complete.'),
       this.checkDirectory('artifact-root', 'Artifact root', getOpenMetaArtifactRoot(), 'Run "openmeta agent" after configuration is complete.'),
+      this.checkOpenMetaBinary(openmetaBinary),
       this.checkBunRuntime(),
       this.checkCommand('runtime-git', 'Git runtime', 'git', ['--version'], 'Install Git and ensure it is available on PATH.'),
       this.checkGitHubConfig(resolvedConfig),
@@ -92,6 +95,7 @@ export class DoctorOrchestrator {
     return {
       configPath,
       homePath,
+      openmetaBinary,
       checks,
       totals,
       ready: totals.fail === 0,
@@ -211,6 +215,35 @@ export class DoctorOrchestrator {
       status: 'pass',
       summary: `${command} is available.`,
       detail: (result.stdout || result.stderr || '').trim().split(/\r?\n/)[0],
+    };
+  }
+
+  private checkOpenMetaBinary(binary: BinaryResolution): DoctorCheck {
+    if (!binary.onPath) {
+      return {
+        id: 'runtime-openmeta',
+        label: 'OpenMeta binary',
+        status: 'warn',
+        summary: 'openmeta is not available on PATH from this shell context.',
+        detail: binary.error,
+        remediation: 'Re-link or reinstall OpenMeta so `openmeta` resolves on PATH, then rerun the doctor.',
+      };
+    }
+
+    const detailParts = [
+      binary.version ? `Version: ${binary.version}` : '',
+      binary.invokedPath ? `PATH entry: ${binary.invokedPath}` : '',
+      binary.resolvedPath && binary.resolvedPath !== binary.invokedPath ? `Resolved path: ${binary.resolvedPath}` : '',
+      binary.symlinkTarget ? `Symlink target: ${binary.symlinkTarget}` : '',
+      `Source: ${binary.source}`,
+    ].filter(Boolean);
+
+    return {
+      id: 'runtime-openmeta',
+      label: 'OpenMeta binary',
+      status: 'pass',
+      summary: `openmeta resolves on PATH (${binary.source}).`,
+      detail: detailParts.join(' | '),
     };
   }
 

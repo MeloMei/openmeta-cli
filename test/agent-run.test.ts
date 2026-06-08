@@ -15,6 +15,7 @@ interface AgentRunInternals {
     draftOnly?: boolean;
     refresh?: boolean;
     repo?: string;
+    repoPath?: string;
     issue?: string;
     dryRun?: boolean;
   }): Promise<void>;
@@ -49,10 +50,18 @@ interface AgentRunInternals {
 interface AnalyzeRunInternals {
   run(options: {
     repo?: string;
+    repoPath?: string;
     headless?: boolean;
     runChecks?: boolean;
     dryRun?: boolean;
   }): Promise<void>;
+  runMachine(options: {
+    repo?: string;
+    repoPath?: string;
+    headless?: boolean;
+    runChecks?: boolean;
+    dryRun?: boolean;
+  }): Promise<unknown>;
   initializeClients(config: AppConfig): Promise<void>;
   promptForSuggestion<T>(suggestions: T[]): Promise<T>;
   prepareArtifactPaths(repoFullName: string, suggestionId: string): {
@@ -474,7 +483,7 @@ describe('AnalyzeOrchestrator run flow', () => {
     await orchestrator.run({ repo: 'https://github.com/acme/demo', headless: true });
 
     expect(promptForSuggestionSpy).not.toHaveBeenCalled();
-    expect(workspaceService.prepareRepositoryWorkspace).toHaveBeenCalledWith('acme/demo', memory, false, 'headless');
+    expect(workspaceService.prepareRepositoryWorkspace).toHaveBeenCalledWith('acme/demo', memory, false, 'headless', undefined);
     expect(llmService.generatePatchDraft).toHaveBeenCalledWith(
       expect.objectContaining({
         repoFullName: 'acme/demo',
@@ -498,5 +507,67 @@ describe('AnalyzeOrchestrator run flow', () => {
       selectedSuggestion: topSuggestion,
       artifacts,
     }));
+  });
+
+  test('passes repoPath through repository analysis workflow', async () => {
+    const orchestrator = new AnalyzeOrchestrator() as unknown as AnalyzeRunInternals;
+    const config = createConfig();
+    const workspace = createWorkspace({
+      workspacePath: '/tmp/openmeta-analysis-worktree',
+      branchName: 'openmeta/analyze-acme-demo',
+    });
+    const memory = createMemory({ repoFullName: 'acme/demo' });
+    const suggestion = createRepositorySuggestion({
+      id: 'config-validation',
+      title: 'Add config validation tests',
+      prPotentialScore: 93,
+    });
+    const patchDraft = createPatchDraft();
+    const prDraft = createPullRequestDraft();
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(orchestrator as object as { initializeClients: AnalyzeRunInternals['initializeClients'] }, 'initializeClients').mockResolvedValue(undefined);
+    spyOn(memoryService, 'load').mockReturnValue(memory);
+    const prepareSpy = spyOn(workspaceService, 'prepareRepositoryWorkspace').mockResolvedValue(workspace);
+    spyOn(llmService, 'analyzeRepository').mockResolvedValue({
+      version: '1',
+      kind: 'repository_suggestion_list',
+      status: 'success',
+      data: [suggestion],
+    });
+    spyOn(llmService, 'generatePatchDraft').mockResolvedValue({
+      version: '1',
+      kind: 'patch_draft',
+      status: 'success',
+      data: patchDraft,
+    });
+    spyOn(llmService, 'generatePrDraft').mockResolvedValue({
+      version: '1',
+      kind: 'pull_request_draft',
+      status: 'success',
+      data: prDraft,
+    });
+    spyOn(contentService, 'formatRepositoryAnalysisMarkdown').mockReturnValue('# Repository Analysis');
+    spyOn(contentService, 'formatPatchDraftMarkdown').mockReturnValue('# Patch');
+    spyOn(contentService, 'formatPullRequestDraftMarkdown').mockReturnValue('# PR');
+    spyOn(orchestrator as object as { prepareArtifactPaths: AnalyzeRunInternals['prepareArtifactPaths'] }, 'prepareArtifactPaths')
+      .mockReturnValue({
+        artifactDir: '/tmp/openmeta/artifacts/analyze',
+        analysisPath: '/tmp/openmeta/artifacts/analyze/repository-analysis.md',
+        patchDraftPath: '/tmp/openmeta/artifacts/analyze/patch-draft.md',
+        prDraftPath: '/tmp/openmeta/artifacts/analyze/pr-draft.md',
+      });
+    spyOn(orchestrator as object as { writeLocalArtifacts: AnalyzeRunInternals['writeLocalArtifacts'] }, 'writeLocalArtifacts')
+      .mockImplementation(() => {});
+    spyOn(orchestrator as object as { showResult: AnalyzeRunInternals['showResult'] }, 'showResult')
+      .mockImplementation(() => {});
+
+    await orchestrator.run({
+      repo: 'acme/demo',
+      repoPath: '/Users/example/src/demo',
+      headless: true,
+    });
+
+    expect(prepareSpy).toHaveBeenCalledWith('acme/demo', memory, false, 'headless', '/Users/example/src/demo');
   });
 });

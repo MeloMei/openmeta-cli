@@ -12,6 +12,7 @@ describe('registerAnalyzeCommand', () => {
 
     expect(help).toContain('analyze');
     expect(help).toContain('--repo <repository>');
+    expect(help).toContain('--repo-path <path>');
     expect(help).toContain('--headless');
     expect(help).toContain('--run-checks');
     expect(help).toContain('--dry-run');

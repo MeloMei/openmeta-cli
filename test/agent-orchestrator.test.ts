@@ -750,9 +750,10 @@ describe('AgentOrchestrator support behavior', () => {
 
     expect(emptyStateSpy).toHaveBeenCalledWith(
       'OpenMeta Scout',
-      'No issues found',
-      'No issues met the current scoring thresholds.',
+      'No issues cleared the current filters',
+      expect.stringContaining('75/100 threshold'),
     );
+    expect(emptyStateSpy.mock.calls[0]?.[2]).toContain('Broaden your tech stack or focus areas');
   });
 
   test('collects confirmations for headless and publish prompts', async () => {

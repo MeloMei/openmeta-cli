@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { DoctorOrchestrator } from '../src/orchestration/doctor.js';
+import * as runtimeDiagnosticsModule from '../src/services/runtime-diagnostics.js';
 import type { AppConfig } from '../src/types/index.js';
+import { mock, spyOn } from 'bun:test';
 
 let tempRoot = '';
 
@@ -78,6 +80,7 @@ describe('DoctorOrchestrator', () => {
   });
 
   afterEach(() => {
+    mock.restore();
     delete process.env['OPENMETA_CONFIG_DIR'];
     delete process.env['OPENMETA_HOME'];
 
@@ -89,11 +92,26 @@ describe('DoctorOrchestrator', () => {
 
   test('reports a ready local surface when required config and directories are present', async () => {
     prepareOpenMetaDirs();
+    spyOn(runtimeDiagnosticsModule, 'inspectBinaryOnPath').mockReturnValue({
+      onPath: true,
+      command: 'openmeta',
+      version: '1.2.3',
+      invokedPath: '/Users/demo/.bun/bin/openmeta',
+      resolvedPath: '/Users/demo/work/openmeta-cli/bin/openmeta.js',
+      symlinkTarget: '../install/global/node_modules/openmeta-cli/bin/openmeta.js',
+      source: 'bun-link',
+    });
 
     const report = await new DoctorOrchestrator().inspect(createConfig());
 
     expect(report.ready).toBe(true);
     expect(report.totals.fail).toBe(0);
+    expect(report.openmetaBinary).toEqual(expect.objectContaining({
+      source: 'bun-link',
+      invokedPath: '/Users/demo/.bun/bin/openmeta',
+      resolvedPath: '/Users/demo/work/openmeta-cli/bin/openmeta.js',
+    }));
+    expect(report.checks.find((check) => check.id === 'runtime-openmeta')?.detail).toContain('Resolved path');
     expect(report.checks.find((check) => check.id === 'github-config')?.status).toBe('pass');
     expect(report.checks.find((check) => check.id === 'llm-config')?.status).toBe('pass');
   });

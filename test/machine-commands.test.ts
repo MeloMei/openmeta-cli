@@ -3,12 +3,21 @@ import { Command } from 'commander';
 import { registerMachineCommand } from '../src/commands/machine.js';
 import * as infra from '../src/infra/index.js';
 import { agentOrchestrator, analyzeOrchestrator, configOrchestrator, providerOrchestrator } from '../src/orchestration/index.js';
-import { githubService, issueRankingService } from '../src/services/index.js';
-import { createPatchDraft, createPullRequestDraft, createRankedIssue, createRepositorySuggestion, createWorkspace } from './helpers/factories.js';
+import { contentService, githubService, issueRankingService, llmService, memoryService, workspaceService } from '../src/services/index.js';
+import { createMemory, createPatchDraft, createPullRequestDraft, createRankedIssue, createRepositorySuggestion, createWorkspace } from './helpers/factories.js';
 
 function captureStdout(): string[] {
   const writes: string[] = [];
   spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    writes.push(String(chunk));
+    return true;
+  });
+  return writes;
+}
+
+function captureStderr(): string[] {
+  const writes: string[] = [];
+  spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
     writes.push(String(chunk));
     return true;
   });
@@ -42,6 +51,8 @@ describe('machine commands', () => {
 
     const machineCommand = program.commands.find((command) => command.name() === 'machine');
     const help = machineCommand?.helpInformation() ?? '';
+    const analyzeHelp = machineCommand?.commands.find((command) => command.name() === 'analyze')?.helpInformation() ?? '';
+    const agentHelp = machineCommand?.commands.find((command) => command.name() === 'agent')?.helpInformation() ?? '';
 
     expect(help).toContain('doctor');
     expect(help).toContain('config');
@@ -50,6 +61,8 @@ describe('machine commands', () => {
     expect(help).toContain('scout');
     expect(help).toContain('analyze');
     expect(help).toContain('agent');
+    expect(analyzeHelp).toContain('--repo-path <path>');
+    expect(agentHelp).toContain('--repo-path <path>');
   });
 
   test('machine doctor writes only JSON to stdout', async () => {
@@ -238,6 +251,7 @@ describe('machine commands', () => {
 
   test('machine analyze writes repository analysis output as JSON only', async () => {
     const writes = captureStdout();
+    const stderrWrites = captureStderr();
     const program = new Command();
     registerMachineCommand(program);
     const suggestion = createRepositorySuggestion();
@@ -248,36 +262,68 @@ describe('machine commands', () => {
       branchName: 'openmeta/analyze-acme-demo',
     });
 
-    spyOn(analyzeOrchestrator, 'runMachine').mockResolvedValue({
-      repoFullName: 'acme/demo',
-      workspace,
-      selectedSuggestion: suggestion,
-      suggestions: [suggestion],
-      patchDraft,
-      prDraft,
-      artifacts: {
-        artifactDir: '/tmp/openmeta/artifacts/analyze',
-        analysisPath: '/tmp/openmeta/artifacts/analyze/repository-analysis.md',
-        patchDraftPath: '/tmp/openmeta/artifacts/analyze/patch-draft.md',
-        prDraftPath: '/tmp/openmeta/artifacts/analyze/pr-draft.md',
+    spyOn(infra.configService, 'get').mockResolvedValue({
+      userProfile: { techStack: ['typescript'], proficiency: 'intermediate', focusAreas: ['tooling'] },
+      github: { pat: 'ghp_test_token', username: 'octocat', targetRepoPath: '' },
+      llm: {
+        provider: 'custom',
+        apiBaseUrl: 'https://example.com/v1',
+        apiKey: 'sk-test',
+        modelName: 'test-model',
+        apiHeaders: {},
       },
-      mode: {
-        headless: true,
-        runChecks: false,
-        dryRun: true,
+      automation: {
+        enabled: false,
+        scheduleTime: '09:00',
+        timezone: 'UTC',
+        contentType: 'research_note',
+        scheduler: 'manual',
+        minMatchScore: 70,
+        skipIfAlreadyGeneratedToday: true,
       },
+      scoring: DEFAULT_SCORING,
+      commitTemplate: 'feat: {{title}}',
     });
+    spyOn(analyzeOrchestrator as unknown as { validateConfig(config: unknown): Promise<void> }, 'validateConfig').mockResolvedValue(undefined);
+    spyOn(analyzeOrchestrator as unknown as { initializeClients(config: unknown): Promise<void> }, 'initializeClients').mockResolvedValue(undefined);
+    spyOn(memoryService, 'load').mockReturnValue(createMemory({ repoFullName: 'acme/demo' }));
+    spyOn(workspaceService, 'prepareRepositoryWorkspace').mockResolvedValue(workspace);
+    spyOn(llmService, 'analyzeRepository').mockResolvedValue({
+      version: '1',
+      kind: 'repository_suggestion_list',
+      status: 'success',
+      data: [suggestion],
+    });
+    spyOn(llmService, 'generatePatchDraft').mockResolvedValue({
+      version: '1',
+      kind: 'patch_draft',
+      status: 'success',
+      data: patchDraft,
+    });
+    spyOn(llmService, 'generatePrDraft').mockResolvedValue({
+      version: '1',
+      kind: 'pull_request_draft',
+      status: 'success',
+      data: prDraft,
+    });
+    spyOn(contentService, 'formatRepositoryAnalysisMarkdown').mockReturnValue('# Repository Analysis');
+    spyOn(contentService, 'formatPatchDraftMarkdown').mockReturnValue('# Patch');
+    spyOn(contentService, 'formatPullRequestDraftMarkdown').mockReturnValue('# PR');
 
-    await program.parseAsync(['machine', 'analyze', '--repo', 'acme/demo', '--headless', '--dry-run'], { from: 'user' });
+    await program.parseAsync(['machine', 'analyze', '--repo', 'acme/demo', '--repo-path', '/Users/example/src/demo', '--headless', '--dry-run'], { from: 'user' });
 
     const output = JSON.parse(writes.join(''));
     expect(output.command).toBe('machine analyze');
     expect(output.data.repoFullName).toBe('acme/demo');
     expect(output.data.mode.dryRun).toBe(true);
+    expect(stderrWrites.join('')).toContain('Machine execution plan for machine analyze');
+    expect(stderrWrites.join('')).toContain('Prepare repository workspace');
+    expect(stderrWrites.join('')).toContain('Inspecting repository for grounded contribution ideas');
   });
 
   test('machine agent writes execution outcome as JSON only', async () => {
     const writes = captureStdout();
+    const stderrWrites = captureStderr();
     const program = new Command();
     registerMachineCommand(program);
     const issue = createRankedIssue({ repoFullName: 'acme/demo', number: 42 });
@@ -330,6 +376,8 @@ describe('machine commands', () => {
     expect(output.command).toBe('machine agent');
     expect(output.data.executionOutcome).toBe('draft_only');
     expect(output.data.repoMutated).toBe(false);
+    expect(stderrWrites.join('')).toContain('Machine execution plan for machine agent');
+    expect(stderrWrites.join('')).toContain('Draft patch and PR artifacts without mutating the repository');
   });
 
   test('machine scout suppresses human task output during real machine execution', async () => {

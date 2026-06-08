@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { basename, dirname, join, relative, resolve, sep } from 'path';
 import { simpleGit, type SimpleGit } from 'simple-git';
@@ -31,6 +31,13 @@ const MAX_GENERATED_FILES = 6;
 const MAX_GENERATED_FILE_CHARS = 60_000;
 type ExecutionMode = 'interactive' | 'headless';
 
+interface PreparedWorkspaceState {
+  workspacePath: string;
+  defaultBranch: string;
+  workspaceDirty: boolean;
+  branchName?: string;
+}
+
 function sanitizeRepoName(repoFullName: string): string {
   return repoFullName.replace(/\//g, '__');
 }
@@ -48,26 +55,30 @@ export class WorkspaceService {
     return join(ensureDirectory(getOpenMetaWorkspaceRoot()), sanitizeRepoName(repoFullName));
   }
 
+  private getWorktreeRoot(): string {
+    return join(ensureDirectory(getOpenMetaWorkspaceRoot()), '..', 'worktrees');
+  }
+
   async prepareWorkspace(
     issue: RankedIssue,
     memory: RepoMemory,
     runChecks: boolean,
     executionMode: ExecutionMode = 'interactive',
+    repoPath?: string,
   ): Promise<RepoWorkspaceContext> {
-    const workspacePath = this.getWorkspacePath(issue.repoFullName);
     const workspaceState = await this.prepareGitWorkspace(
       issue.repoFullName,
-      workspacePath,
       (git) => this.createWorkspaceBranchName(git, issue),
+      repoPath,
     );
     const candidateFiles = this.rankCandidateFiles(
       issue,
       memory,
-      this.discoverFiles(workspacePath),
+      this.discoverFiles(workspaceState.workspacePath),
     ).slice(0, 8);
 
     return this.buildWorkspaceContext({
-      workspacePath,
+      workspacePath: workspaceState.workspacePath,
       workspaceDirty: workspaceState.workspaceDirty,
       defaultBranch: workspaceState.defaultBranch,
       branchName: workspaceState.branchName,
@@ -82,20 +93,20 @@ export class WorkspaceService {
     memory: RepoMemory,
     runChecks: boolean,
     executionMode: ExecutionMode = 'interactive',
+    repoPath?: string,
   ): Promise<RepoWorkspaceContext> {
-    const workspacePath = this.getWorkspacePath(repoFullName);
     const workspaceState = await this.prepareGitWorkspace(
       repoFullName,
-      workspacePath,
       (git) => this.createRepositoryAnalysisBranchName(git, repoFullName),
+      repoPath,
     );
     const candidateFiles = this.rankRepositoryAnalysisFiles(
       memory,
-      this.discoverFiles(workspacePath),
+      this.discoverFiles(workspaceState.workspacePath),
     ).slice(0, 12);
 
     return this.buildWorkspaceContext({
-      workspacePath,
+      workspacePath: workspaceState.workspacePath,
       candidateFiles,
       workspaceDirty: workspaceState.workspaceDirty,
       defaultBranch: workspaceState.defaultBranch,
@@ -228,28 +239,135 @@ export class WorkspaceService {
 
   private async prepareGitWorkspace(
     repoFullName: string,
-    workspacePath: string,
     createBranchName: (git: SimpleGit) => Promise<string>,
-  ): Promise<{ defaultBranch: string; workspaceDirty: boolean; branchName?: string }> {
-    const repoUrl = this.buildRepoUrl(repoFullName);
-
-    if (!existsSync(workspacePath)) {
-      mkdirSync(dirname(workspacePath), { recursive: true });
-      await simpleGit().clone(repoUrl, workspacePath);
+    repoPath?: string,
+  ): Promise<PreparedWorkspaceState> {
+    if (repoPath) {
+      return this.prepareExternalWorkspace(repoFullName, repoPath, createBranchName);
     }
 
-    const git = simpleGit(workspacePath);
-    await git.fetch('origin');
+    return this.prepareManagedWorkspace(repoFullName, createBranchName);
+  }
 
-    const defaultBranch = await this.detectDefaultBranch(git);
+  private async prepareManagedWorkspace(
+    repoFullName: string,
+    createBranchName: (git: SimpleGit) => Promise<string>,
+  ): Promise<PreparedWorkspaceState> {
+    const workspacePath = this.getWorkspacePath(repoFullName);
+    const repoUrl = this.buildRepoUrl(repoFullName);
+    const defaultBranch = await this.detectRemoteDefaultBranch(repoUrl);
+
+    try {
+      if (!existsSync(workspacePath)) {
+        await this.cloneManagedWorkspace(repoUrl, workspacePath, defaultBranch);
+      }
+
+      const git = simpleGit(workspacePath);
+      await this.syncManagedWorkspace(git);
+
+      if (!existsSync(join(workspacePath, '.git', 'shallow'))) {
+        try {
+          await git.fetch('origin', defaultBranch, { '--depth': '1', '--prune': null });
+        } catch (error) {
+          logger.debug(`Unable to re-fetch ${repoFullName} as a shallow workspace`, error);
+        }
+      }
+
+      return await this.finalizeWorkspaceBranch(git, workspacePath, defaultBranch, createBranchName);
+    } catch (error) {
+      if (!this.isRecoverableManagedWorkspaceError(error)) {
+        throw error;
+      }
+
+      logger.warn(`Managed workspace cache for ${repoFullName} is invalid. Rebuilding the shallow clone.`, error);
+      rmSync(workspacePath, { recursive: true, force: true });
+      await this.cloneManagedWorkspace(repoUrl, workspacePath, defaultBranch);
+      const recoveredGit = simpleGit(workspacePath);
+      await this.syncManagedWorkspace(recoveredGit);
+
+      try {
+        await recoveredGit.fetch('origin', defaultBranch, { '--depth': '1', '--prune': null });
+      } catch (error) {
+        logger.debug(`Unable to re-fetch ${repoFullName} as a shallow workspace`, error);
+      }
+
+      return await this.finalizeWorkspaceBranch(recoveredGit, workspacePath, defaultBranch, createBranchName);
+    }
+  }
+
+  private async prepareExternalWorkspace(
+    repoFullName: string,
+    repoPath: string,
+    createBranchName: (git: SimpleGit) => Promise<string>,
+  ): Promise<PreparedWorkspaceState> {
+    const sourcePath = resolve(repoPath);
+    if (!existsSync(sourcePath)) {
+      throw new Error(`Configured local repository path does not exist: ${repoPath}`);
+    }
+
+    const sourceGit = simpleGit(sourcePath);
+    const isRepo = await sourceGit.checkIsRepo();
+    if (!isRepo) {
+      throw new Error(`Configured local repository path is not a git repository: ${repoPath}`);
+    }
+
+    await this.assertRepositoryReadyForWorktree(sourceGit, sourcePath);
+
+    const defaultBranch = await this.detectDefaultBranch(sourceGit);
+    try {
+      await sourceGit.fetch('origin', defaultBranch, { '--depth': '1', '--prune': null });
+    } catch (error) {
+      logger.debug(`Unable to refresh external repository ${sourcePath} from origin/${defaultBranch}`, error);
+    }
+
+    const branchName = await createBranchName(sourceGit);
+    const worktreePath = this.getExecutionWorktreePath(repoFullName, branchName);
+    const parentDir = dirname(worktreePath);
+    mkdirSync(parentDir, { recursive: true });
+
+    if (existsSync(worktreePath)) {
+      const worktreeGit = simpleGit(worktreePath);
+      try {
+        await worktreeGit.raw(['worktree', 'remove', '--force', worktreePath]);
+      } catch (error) {
+        logger.debug(`Unable to remove stale worktree at ${worktreePath}`, error);
+      }
+    }
+
+    const baseRef = `origin/${defaultBranch}`;
+    try {
+      await sourceGit.raw(['worktree', 'add', '-b', branchName, worktreePath, baseRef]);
+    } catch {
+      await sourceGit.raw(['worktree', 'add', '-b', branchName, worktreePath, defaultBranch]);
+    }
+
+    const worktreeGit = simpleGit(worktreePath);
+    return this.finalizeWorkspaceBranch(worktreeGit, worktreePath, defaultBranch, async () => branchName, true);
+  }
+
+  private async syncManagedWorkspace(git: SimpleGit): Promise<void> {
+    try {
+      await git.fetch('origin');
+    } catch (error) {
+      logger.debug('Unable to fetch managed workspace before preparing branch', error);
+    }
+  }
+
+  private async finalizeWorkspaceBranch(
+    git: SimpleGit,
+    workspacePath: string,
+    defaultBranch: string,
+    createBranchName: (git: SimpleGit) => Promise<string>,
+    branchAlreadyCreated: boolean = false,
+  ): Promise<PreparedWorkspaceState> {
     const status = await git.status();
     const workspaceDirty = status.files.length > 0;
     const branchName = workspaceDirty ? undefined : await createBranchName(git);
 
-    if (!workspaceDirty && branchName) {
+    if (!workspaceDirty && branchName && !branchAlreadyCreated) {
       await git.checkout(defaultBranch);
       try {
-        await git.pull('origin', defaultBranch);
+        await git.pull('origin', defaultBranch, { '--ff-only': null });
       } catch (error) {
         logger.debug('Unable to fast-forward workspace before branch creation', error);
       }
@@ -258,10 +376,57 @@ export class WorkspaceService {
     }
 
     return {
+      workspacePath,
       defaultBranch,
       workspaceDirty,
       branchName,
     };
+  }
+
+  private async cloneManagedWorkspace(repoUrl: string, workspacePath: string, defaultBranch: string): Promise<void> {
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    await simpleGit().clone(repoUrl, workspacePath, ['--depth', '1', '--single-branch', '--branch', defaultBranch]);
+  }
+
+  private isRecoverableManagedWorkspaceError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /\binvalid HEAD\b|\bbad object HEAD\b|\bambiguous argument 'HEAD'\b|\bNeeded a single revision\b|\bunable to read tree\b/i.test(message);
+  }
+
+  private getExecutionWorktreePath(repoFullName: string, branchName: string): string {
+    return join(
+      ensureDirectory(this.getWorktreeRoot()),
+      sanitizeRepoName(repoFullName),
+      branchName.replace(/\//g, '__'),
+    );
+  }
+
+  private async assertRepositoryReadyForWorktree(git: SimpleGit, sourcePath: string): Promise<void> {
+    const gitDir = await git.revparse(['--git-dir']);
+    const absoluteGitDir = resolve(sourcePath, gitDir.trim());
+    const conflictMarkers = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'BISECT_LOG']
+      .map((marker) => join(absoluteGitDir, marker))
+      .filter((filePath) => existsSync(filePath));
+
+    if (conflictMarkers.length > 0) {
+      throw new Error(`Local repository is mid-operation and cannot be reused safely: ${sourcePath}`);
+    }
+    await git.status();
+  }
+
+  private async detectRemoteDefaultBranch(repoUrl: string): Promise<string> {
+    const lsRemote = spawnSync('git', ['ls-remote', '--symref', repoUrl, 'HEAD'], {
+      encoding: 'utf-8',
+      timeout: 30000,
+    });
+
+    const firstLine = lsRemote.stdout.split('\n').find((line) => line.startsWith('ref:'));
+    const match = firstLine?.match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/);
+    if (match?.[1]) {
+      return match[1];
+    }
+
+    return 'main';
   }
 
   private buildWorkspaceContext(input: {

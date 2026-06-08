@@ -46,6 +46,7 @@ export interface AgentRunOptions {
   draftOnly?: boolean;
   refresh?: boolean;
   repo?: string;
+  repoPath?: string;
   issue?: string;
   dryRun?: boolean;
 }
@@ -64,6 +65,11 @@ export interface MachineScoutResult {
     refresh: boolean;
     repo?: string;
     localOnly: boolean;
+  };
+  emptyExplanation?: {
+    title: string;
+    detail: string;
+    suggestions: string[];
   };
   nextActions: string[];
 }
@@ -160,7 +166,27 @@ const AGENT_STAGES: Array<{ id: AgentStageId; label: string; description: string
 export class AgentOrchestrator {
   private octokit: Octokit | null = null;
 
+  private buildScoutEmptyExplanation(
+    config: AppConfig,
+    options: { repoFullName?: string; localOnly: boolean; refresh: boolean },
+  ): { title: string; detail: string; suggestions: string[] } {
+    const scopeLine = options.repoFullName
+      ? `This run was limited to ${options.repoFullName}.`
+      : 'This run searched the broader GitHub issue stream.';
+
+    return {
+      title: 'No issues cleared the current filters',
+      detail: `${scopeLine} OpenMeta did not find any opportunities that survived the current profile weighting and ${config.automation.minMatchScore}/100 threshold.`,
+      suggestions: [
+        `Lower automation.minMatchScore below ${config.automation.minMatchScore}.`,
+        options.repoFullName ? 'Try a different repository or remove the repo filter.' : 'Broaden your tech stack or focus areas in the saved profile.',
+        options.localOnly ? 'Run scout without --local after the LLM provider is healthy to widen scoring coverage.' : options.refresh ? 'Try again later after new issues appear.' : 'Rerun with --refresh to ignore the local issue cache.',
+      ],
+    };
+  }
+
   async runMachine(options: AgentRunOptions = {}): Promise<MachineAgentResult> {
+    const totalSteps = 8;
     const config = await configService.get();
     const headless = options.headless ?? true;
     const schedulerRun = Boolean(options.schedulerRun);
@@ -168,6 +194,7 @@ export class AgentOrchestrator {
     const draftOnly = Boolean(options.draftOnly);
     const refresh = Boolean(options.refresh);
     const dryRun = Boolean(options.dryRun);
+    const repoPath = options.repoPath?.trim() || undefined;
     const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
     const repoFullName = issueTarget?.repoFullName ?? (options.repo ? parseGitHubRepoFullName(options.repo) : undefined);
 
@@ -177,14 +204,38 @@ export class AgentOrchestrator {
       await this.confirmManualHeadlessRun(config);
     }
 
-    await this.initializeClients(config);
+    await this.initializeClients(config, {
+      validateGithub: true,
+      validateLlm: true,
+      taskSteps: {
+        github: { index: 1, total: totalSteps },
+        llm: { index: 2, total: totalSteps },
+      },
+    });
+    this.showLocalRepositoryHint(repoPath);
 
     const rankedIssues = issueTarget
-      ? await issueRankingService.loadTargetIssue(config, issueTarget)
-      : await issueRankingService.loadRankedIssues(config, {
+      ? await ui.task({
+        title: 'Loading target issue',
+        doneMessage: 'Target issue loaded',
+        failedMessage: 'Target issue loading failed',
+        tone: 'info',
+        step: { index: 3, total: totalSteps },
+      }, async () => issueRankingService.loadTargetIssue(config, issueTarget))
+      : await ui.task({
+        title: 'Ranking contribution opportunities',
+        doneMessage: 'Contribution opportunities ranked',
+        failedMessage: 'Contribution opportunity ranking failed',
+        tone: 'info',
+        step: { index: 3, total: totalSteps },
+        heartbeat: {
+          message: 'Still ranking contribution opportunities',
+        },
+      }, async (task) => issueRankingService.loadRankedIssues(config, {
         refresh,
         repoFullName,
-      });
+        onStatus: (message) => task.setMessage(message),
+      }));
 
     if (rankedIssues.length === 0) {
       throw new Error(issueTarget
@@ -205,15 +256,34 @@ export class AgentOrchestrator {
     }
 
     const memoryBeforeRun = memoryService.load(selectedIssue.repoFullName);
-    const workspace = await workspaceService.prepareWorkspace(
+    const workspace = await ui.task({
+      title: `Preparing workspace for ${selectedIssue.repoFullName}`,
+      doneMessage: 'Workspace prepared',
+      failedMessage: 'Workspace preparation failed',
+      tone: 'info',
+      step: { index: 4, total: totalSteps },
+      heartbeat: {
+        message: 'Still preparing repository workspace',
+      },
+    }, async () => workspaceService.prepareWorkspace(
       selectedIssue,
       memoryBeforeRun,
       runChecks,
       headless ? 'headless' : 'interactive',
-    );
+      repoPath,
+    ));
     const memory = memoryService.update(selectedIssue, workspace);
 
-    const patchDraftResult = await llmService.generatePatchDraft(selectedIssue, workspace, memory);
+    const patchDraftResult = await ui.task({
+      title: 'Generating patch strategy',
+      doneMessage: 'Patch strategy generated',
+      failedMessage: 'Patch strategy generation failed',
+      tone: 'info',
+      step: { index: 5, total: totalSteps },
+      heartbeat: {
+        message: 'Still drafting patch strategy',
+      },
+    }, async () => llmService.generatePatchDraft(selectedIssue, workspace, memory));
     const patchDraft = patchDraftResult.data;
     const implementationWorkspace = this.buildImplementationWorkspace(workspace, patchDraft);
     const implementation = patchDraftResult.status === 'success'
@@ -229,12 +299,27 @@ export class AgentOrchestrator {
       testResults: implementation.validationResults,
     };
 
-    const prDraftResult = await llmService.generatePrDraft(selectedIssue, patchDraft, workspaceForArtifacts);
+    const prDraftResult = await ui.task({
+      title: 'Generating PR narrative',
+      doneMessage: 'PR narrative generated',
+      failedMessage: 'PR narrative generation failed',
+      tone: 'info',
+      step: { index: 6, total: totalSteps },
+      heartbeat: {
+        message: 'Still drafting PR narrative',
+      },
+    }, async () => llmService.generatePrDraft(selectedIssue, patchDraft, workspaceForArtifacts));
     const prDraft = prDraftResult.data;
     const patchDraftMarkdown = contentService.formatPatchDraftMarkdown(patchDraft);
     const prDraftMarkdown = contentService.formatPullRequestDraftMarkdown(prDraft);
 
-    const contributionPullRequest = await this.submitContributionPullRequestIfPossible({
+    const contributionPullRequest = await ui.task({
+      title: 'Evaluating draft PR creation',
+      doneMessage: 'Draft PR evaluation complete',
+      failedMessage: 'Draft PR evaluation failed',
+      tone: 'info',
+      step: { index: 7, total: totalSteps },
+    }, async () => this.submitContributionPullRequestIfPossible({
       config,
       allowRealPr: patchDraftResult.status === 'success' && prDraftResult.status === 'success',
       headless,
@@ -243,7 +328,7 @@ export class AgentOrchestrator {
       workspace: workspaceForArtifacts,
       changedFiles: implementation.changedFiles,
       validationResults: implementation.validationResults,
-    });
+    }));
 
     const artifacts = this.prepareLocalArtifactPaths(selectedIssue);
     const reviewRequired =
@@ -302,7 +387,13 @@ export class AgentOrchestrator {
         proofMarkdown,
       });
 
-      const publishResult = await this.publishArtifactsIfNeeded({
+      const publishResult = await ui.task({
+        title: dryRun ? 'Previewing artifact publication' : 'Publishing contribution artifacts',
+        doneMessage: dryRun ? 'Artifact publication preview complete' : 'Contribution artifacts published',
+        failedMessage: dryRun ? 'Artifact publication preview failed' : 'Contribution artifact publication failed',
+        tone: 'info',
+        step: { index: 8, total: totalSteps },
+      }, async () => this.publishArtifactsIfNeeded({
         config,
         headless,
         dryRun: options.dryRun,
@@ -316,7 +407,7 @@ export class AgentOrchestrator {
         changedFiles: implementation.changedFiles,
         validationResults: implementation.validationResults,
         pullRequestUrl: contributionPullRequest.url,
-      });
+      }));
 
       const finalProofRecord = {
         ...proofRecord,
@@ -384,6 +475,7 @@ export class AgentOrchestrator {
     const runChecks = typeof options.runChecks === 'boolean' ? options.runChecks : !headless;
     const draftOnly = Boolean(options.draftOnly);
     const refresh = Boolean(options.refresh);
+    const repoPath = options.repoPath?.trim() || undefined;
     const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
     const repoFullName = issueTarget?.repoFullName ?? (options.repo ? parseGitHubRepoFullName(options.repo) : undefined);
     const completedStages = new Set<AgentStageId>();
@@ -407,6 +499,9 @@ export class AgentOrchestrator {
           : repoFullName
             ? `Issue discovery is limited to ${repoFullName}.`
             : 'Issue discovery will scan the broader GitHub issue stream.',
+        repoPath
+          ? `Local repository reuse is enabled via ${repoPath}. OpenMeta will create an isolated worktree and a fresh branch before opening a PR.`
+          : 'If the repository already exists locally, pass --repo-path <local-path> so OpenMeta can reuse it via an isolated worktree and open the PR from a fresh branch.',
         headless ? `Unattended selection honors the saved threshold at ${config.automation.minMatchScore}/100.` : 'You stay in control at each decision gate before anything is published.',
       ],
     });
@@ -421,6 +516,7 @@ export class AgentOrchestrator {
       ? `Verifying provider access and loading ${issueTarget.repoFullName}#${issueTarget.issueNumber}.`
       : 'Verifying provider access and loading ranked opportunities.');
     await this.initializeClients(config);
+    this.showLocalRepositoryHint(repoPath);
 
     const rankedIssues = await ui.task({
       title: issueTarget ? 'Loading target issue' : 'Ranking contribution opportunities',
@@ -486,6 +582,7 @@ export class AgentOrchestrator {
       memoryBeforeRun,
       runChecks,
       headless ? 'headless' : 'interactive',
+      repoPath,
     ));
     const memory = memoryService.update(selectedIssue, workspace);
     completedStages.add('prepare');
@@ -720,7 +817,8 @@ export class AgentOrchestrator {
       onStatus: (message) => task.setMessage(message),
     }));
     if (rankedIssues.length === 0) {
-      ui.emptyState('OpenMeta Scout', 'No issues found', 'No issues met the current scoring thresholds.');
+      const emptyExplanation = this.buildScoutEmptyExplanation(config, { repoFullName, localOnly, refresh });
+      ui.emptyState('OpenMeta Scout', emptyExplanation.title, `${emptyExplanation.detail} Next: ${emptyExplanation.suggestions.join(' ')}`);
       return;
     }
 
@@ -734,6 +832,7 @@ export class AgentOrchestrator {
   }
 
   async scoutMachine(options: ScoutRunOptions = {}): Promise<MachineScoutResult> {
+    const totalSteps = 3;
     const limit = options.limit ?? 10;
     const refresh = Boolean(options.refresh);
     const repoFullName = options.repo ? parseGitHubRepoFullName(options.repo) : undefined;
@@ -742,14 +841,34 @@ export class AgentOrchestrator {
 
     await this.validateConfig(config, { requireGithub: !localOnly, requireLlm: !localOnly });
     if (!localOnly || repoFullName) {
-      await this.initializeClients(config, { validateGithub: true, validateLlm: !localOnly });
+      await this.initializeClients(config, {
+        validateGithub: true,
+        validateLlm: !localOnly,
+        taskSteps: {
+          github: { index: 1, total: totalSteps },
+          ...(localOnly ? {} : { llm: { index: 2, total: totalSteps } }),
+        },
+      });
     }
 
-    const rankedIssues = await issueRankingService.loadRankedIssues(config, {
+    const rankedIssues = await ui.task({
+      title: 'Scoring contribution opportunities',
+      doneMessage: 'Contribution opportunities scored',
+      failedMessage: 'Contribution opportunity scoring failed',
+      tone: 'info',
+      step: { index: localOnly ? 2 : 3, total: totalSteps },
+      heartbeat: {
+        message: 'Still scoring contribution opportunities',
+      },
+    }, async (task) => issueRankingService.loadRankedIssues(config, {
       refresh,
       repoFullName,
       localOnly,
-    });
+      onStatus: (message) => task.setMessage(message),
+    }));
+    const emptyExplanation = rankedIssues.length === 0
+      ? this.buildScoutEmptyExplanation(config, { repoFullName, localOnly, refresh })
+      : undefined;
 
     return {
       opportunities: issueRankingService.diversifyScoutIssues(rankedIssues, limit),
@@ -759,6 +878,7 @@ export class AgentOrchestrator {
         repo: repoFullName,
         localOnly,
       },
+      ...(emptyExplanation ? { emptyExplanation } : {}),
       nextActions: rankedIssues.length === 0 ? ['broaden_profile_filters'] : ['inspect_ranked_opportunities'],
     };
   }
@@ -1095,7 +1215,14 @@ export class AgentOrchestrator {
 
   private async initializeClients(
     config: AppConfig,
-    options: { validateGithub?: boolean; validateLlm?: boolean } = {},
+    options: {
+      validateGithub?: boolean;
+      validateLlm?: boolean;
+      taskSteps?: {
+        github?: { index: number; total: number };
+        llm?: { index: number; total: number };
+      };
+    } = {},
   ): Promise<void> {
     const validateGithub = options.validateGithub ?? true;
     const validateLlm = options.validateLlm ?? true;
@@ -1107,6 +1234,7 @@ export class AgentOrchestrator {
         doneMessage: 'GitHub access verified',
         failedMessage: 'GitHub access failed',
         tone: 'info',
+        step: options.taskSteps?.github,
       }, async () => {
         const valid = await githubService.validateCredentials();
         if (!valid) {
@@ -1139,6 +1267,7 @@ export class AgentOrchestrator {
       doneMessage: 'LLM provider verified',
       failedMessage: 'LLM provider failed',
       tone: 'info',
+      step: options.taskSteps?.llm,
     }, async () => {
       const valid = await llmService.validateConnection();
       if (!valid) {
@@ -2158,6 +2287,28 @@ export class AgentOrchestrator {
       subtitle: input.subtitle,
       lines: input.lines,
       tone: 'warning',
+    });
+  }
+
+  private showLocalRepositoryHint(repoPath?: string): void {
+    if (repoPath) {
+      logger.info(`Using local repository path via isolated worktree: ${repoPath}`);
+      ui.callout({
+        label: 'OpenMeta Agent',
+        title: 'Local repository reuse enabled',
+        subtitle: 'OpenMeta will reuse the provided local repository through an isolated worktree, create a fresh branch, and keep PR work off your existing checkout.',
+        lines: [`Path: ${repoPath}`],
+        tone: 'info',
+      });
+      return;
+    }
+
+    logger.info('Tip: if this repository already exists locally, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and open the PR from that branch.');
+    ui.callout({
+      label: 'OpenMeta Agent',
+      title: 'Faster local reuse available',
+      subtitle: 'If the repository is already on disk, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and avoid another full local checkout.',
+      tone: 'info',
     });
   }
 

@@ -22,6 +22,7 @@ import {
 
 export interface AnalyzeRunOptions {
   repo?: string;
+  repoPath?: string;
   headless?: boolean;
   runChecks?: boolean;
   dryRun?: boolean;
@@ -61,28 +62,76 @@ export class AnalyzeOrchestrator {
     const headless = Boolean(options.headless);
     const runChecks = Boolean(options.runChecks);
     const dryRun = Boolean(options.dryRun);
+    const repoPath = options.repoPath?.trim() || undefined;
 
     await this.validateConfig(config);
     await this.initializeClients(config);
+    this.showLocalRepositoryHint(repoPath);
 
+    const totalSteps = 7;
     const memory = memoryService.load(repoFullName);
-    const workspace = await workspaceService.prepareRepositoryWorkspace(
+    const workspace = await ui.task({
+      title: 'Preparing repository workspace',
+      doneMessage: 'Repository workspace prepared',
+      failedMessage: 'Repository workspace preparation failed',
+      tone: 'info',
+      step: { index: 3, total: totalSteps },
+      heartbeat: {
+        message: 'Still preparing repository workspace',
+      },
+    }, async () => workspaceService.prepareRepositoryWorkspace(
       repoFullName,
       memory,
       runChecks,
       headless ? 'headless' : 'interactive',
-    );
+      repoPath,
+    ));
 
-    const suggestionsResult = await llmService.analyzeRepository(repoFullName, workspace, memory);
+    const suggestionsResult = await ui.task({
+      title: 'Inspecting repository for grounded contribution ideas',
+      doneMessage: 'Repository suggestions generated',
+      failedMessage: 'Repository suggestion analysis failed',
+      tone: 'info',
+      step: { index: 4, total: totalSteps },
+      heartbeat: {
+        message: 'Still inspecting repository context',
+      },
+    }, async () => llmService.analyzeRepository(repoFullName, workspace, memory));
     const suggestions = suggestionsResult.data;
     const selectedSuggestion = headless
       ? this.selectTopSuggestion(suggestions)
       : await this.promptForSuggestion(suggestions);
     const syntheticIssue = this.buildSyntheticIssue(repoFullName, selectedSuggestion);
 
-    const patchDraftResult = await llmService.generatePatchDraft(syntheticIssue, workspace, memory);
+    await ui.task({
+      title: 'Selecting the strongest repository suggestion',
+      doneMessage: 'Repository suggestion selected',
+      failedMessage: 'Repository suggestion selection failed',
+      tone: 'info',
+      step: { index: 5, total: totalSteps },
+    }, async () => selectedSuggestion);
+
+    const patchDraftResult = await ui.task({
+      title: 'Drafting patch strategy for the selected suggestion',
+      doneMessage: 'Patch strategy drafted',
+      failedMessage: 'Patch strategy drafting failed',
+      tone: 'info',
+      step: { index: 6, total: totalSteps },
+      heartbeat: {
+        message: 'Still drafting patch strategy',
+      },
+    }, async () => llmService.generatePatchDraft(syntheticIssue, workspace, memory));
     const patchDraft = patchDraftResult.data;
-    const prDraftResult = await llmService.generatePrDraft(syntheticIssue, patchDraft, workspace);
+    const prDraftResult = await ui.task({
+      title: 'Drafting pull request narrative for the selected suggestion',
+      doneMessage: 'Pull request narrative drafted',
+      failedMessage: 'Pull request narrative drafting failed',
+      tone: 'info',
+      step: { index: 7, total: totalSteps },
+      heartbeat: {
+        message: 'Still drafting pull request narrative',
+      },
+    }, async () => llmService.generatePrDraft(syntheticIssue, patchDraft, workspace));
     const prDraft = prDraftResult.data;
 
     const artifacts = this.prepareArtifactPaths(repoFullName, selectedSuggestion.id);
@@ -172,6 +221,30 @@ export class AnalyzeOrchestrator {
     });
   }
 
+  private showLocalRepositoryHint(repoPath?: string): void {
+    if (repoPath) {
+      const message = `Using local repository path via isolated worktree: ${repoPath}`;
+      logger.info(message);
+      ui.callout({
+        label: 'OpenMeta Analyze',
+        title: 'Local repository reuse enabled',
+        subtitle: 'OpenMeta will reuse the provided local repository through an isolated worktree, create a fresh branch, and keep PR work off your existing checkout.',
+        lines: [`Path: ${repoPath}`],
+        tone: 'info',
+      });
+      return;
+    }
+
+    const message = 'Tip: if this repository already exists locally, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and open the PR from that branch.';
+    logger.info(message);
+    ui.callout({
+      label: 'OpenMeta Analyze',
+      title: 'Faster local reuse available',
+      subtitle: 'If the repository is already on disk, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and avoid another full local checkout.',
+      tone: 'info',
+    });
+  }
+
   private async validateConfig(config: AppConfig): Promise<void> {
     if (!config.github.pat || !config.github.username) {
       throw new Error('GitHub configuration is incomplete. Please run "openmeta init" first.');
@@ -189,6 +262,7 @@ export class AnalyzeOrchestrator {
       doneMessage: 'GitHub access verified',
       failedMessage: 'GitHub access failed',
       tone: 'info',
+      step: { index: 1, total: 7 },
     }, async () => {
       const valid = await githubService.validateCredentials();
       if (!valid) {
@@ -213,6 +287,7 @@ export class AnalyzeOrchestrator {
       doneMessage: 'LLM provider verified',
       failedMessage: 'LLM provider failed',
       tone: 'info',
+      step: { index: 2, total: 7 },
     }, async () => {
       const valid = await llmService.validateConnection();
       if (!valid) {
