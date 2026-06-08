@@ -8,8 +8,8 @@ import {
   registerDailyCommand,
   registerDoctorCommand,
   registerInboxCommand,
-  registerMachineCommand,
   registerInitCommand,
+  registerMachineCommand,
   registerPowCommand,
   registerProviderCommand,
   registerRunsCommand,
@@ -47,7 +47,10 @@ async function main(): Promise<void> {
   registerSkillCommand(program);
 
   program.on('command:*', () => {
-    ui.commandFailed('openmeta', `Unknown command "${program.args.join(' ')}". Run "openmeta --help" to see available commands.`);
+    ui.commandFailed(
+      'openmeta',
+      `Unknown command "${program.args.join(' ')}". Run "openmeta --help" to see available commands.`,
+    );
     process.exit(1);
   });
 
