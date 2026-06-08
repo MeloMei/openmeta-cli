@@ -63,6 +63,7 @@ describe('machine commands', () => {
     expect(help).toContain('agent');
     expect(analyzeHelp).toContain('--repo-path <path>');
     expect(agentHelp).toContain('--repo-path <path>');
+    expect(agentHelp).toContain('--local-artifacts-only');
   });
 
   test('machine doctor writes only JSON to stdout', async () => {
@@ -360,6 +361,7 @@ describe('machine commands', () => {
       executionPolicy: {
         headless: true,
         draftOnly: true,
+        localArtifactsOnly: false,
         runChecks: false,
         dryRun: true,
         refresh: false,
@@ -378,6 +380,65 @@ describe('machine commands', () => {
     expect(output.data.repoMutated).toBe(false);
     expect(stderrWrites.join('')).toContain('Machine execution plan for machine agent');
     expect(stderrWrites.join('')).toContain('Draft patch and PR artifacts without mutating the repository');
+  });
+
+  test('machine agent forwards local-artifacts-only to the orchestrator', async () => {
+    const program = new Command();
+    registerMachineCommand(program);
+
+    const runSpy = spyOn(agentOrchestrator, 'runMachine').mockResolvedValue({
+      issue: createRankedIssue({ repoFullName: 'acme/demo', number: 42 }),
+      workspace: createWorkspace({
+        workspacePath: '/tmp/openmeta-demo',
+        branchName: 'openmeta/42-accessibility',
+        testResults: [],
+      }),
+      patchDraft: createPatchDraft(),
+      prDraft: createPullRequestDraft(),
+      artifacts: {
+        artifactDir: '/tmp/openmeta/artifacts',
+        dossierPath: '/tmp/openmeta/artifacts/dossier.md',
+        patchDraftPath: '/tmp/openmeta/artifacts/patch-draft.md',
+        prDraftPath: '/tmp/openmeta/artifacts/pr-draft.md',
+        memoryPath: '/tmp/openmeta/artifacts/repo-memory.md',
+        inboxPath: '/tmp/openmeta/artifacts/inbox.md',
+        proofOfWorkPath: '/tmp/openmeta/artifacts/proof-of-work.md',
+      },
+      changedFiles: [],
+      validationResults: [],
+      reviewRequired: false,
+      published: false,
+      prCreated: false,
+      repoMutated: false,
+      artifactsWritten: true,
+      executionOutcome: 'local_artifacts_written',
+      executionPolicy: {
+        headless: true,
+        draftOnly: true,
+        localArtifactsOnly: true,
+        runChecks: false,
+        dryRun: false,
+        refresh: false,
+      },
+      skipReasons: ['draft_only', 'publish_skipped_local_artifacts_only'],
+      nextActions: ['inspect_artifact_paths'],
+      pullRequestUrl: undefined,
+      pullRequestNumber: undefined,
+    });
+
+    await program.parseAsync([
+      'machine',
+      'agent',
+      '--issue',
+      'https://github.com/acme/demo/issues/42',
+      '--draft-only',
+      '--local-artifacts-only',
+    ], { from: 'user' });
+
+    expect(runSpy).toHaveBeenCalledWith(expect.objectContaining({
+      draftOnly: true,
+      localArtifactsOnly: true,
+    }));
   });
 
   test('machine scout suppresses human task output during real machine execution', async () => {

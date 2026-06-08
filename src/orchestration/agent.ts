@@ -44,6 +44,7 @@ export interface AgentRunOptions {
   schedulerRun?: boolean;
   runChecks?: boolean;
   draftOnly?: boolean;
+  localArtifactsOnly?: boolean;
   refresh?: boolean;
   repo?: string;
   repoPath?: string;
@@ -91,6 +92,7 @@ export interface MachineAgentResult {
   executionPolicy: {
     headless: boolean;
     draftOnly: boolean;
+    localArtifactsOnly: boolean;
     runChecks: boolean;
     dryRun: boolean;
     refresh: boolean;
@@ -192,6 +194,7 @@ export class AgentOrchestrator {
     const schedulerRun = Boolean(options.schedulerRun);
     const runChecks = typeof options.runChecks === 'boolean' ? options.runChecks : !headless;
     const draftOnly = Boolean(options.draftOnly);
+    const localArtifactsOnly = Boolean(options.localArtifactsOnly);
     const refresh = Boolean(options.refresh);
     const dryRun = Boolean(options.dryRun);
     const repoPath = options.repoPath?.trim() || undefined;
@@ -200,7 +203,7 @@ export class AgentOrchestrator {
 
     await this.validateConfig(config);
 
-    if (headless && !schedulerRun && !dryRun) {
+    if (headless && !schedulerRun && !dryRun && !localArtifactsOnly) {
       await this.confirmManualHeadlessRun(config);
     }
 
@@ -337,6 +340,7 @@ export class AgentOrchestrator {
       || prDraftResult.status !== 'success';
     const skipReasons = [
       ...(draftOnly ? ['draft_only'] : []),
+      ...(localArtifactsOnly ? ['publish_skipped_local_artifacts_only'] : []),
       ...(patchDraftResult.status !== 'success' ? ['patch_draft_requires_review'] : []),
       ...(implementation.reviewRequired ? ['implementation_requires_review'] : []),
       ...(prDraftResult.status !== 'success' ? ['pr_draft_requires_review'] : []),
@@ -387,27 +391,29 @@ export class AgentOrchestrator {
         proofMarkdown,
       });
 
-      const publishResult = await ui.task({
-        title: dryRun ? 'Previewing artifact publication' : 'Publishing contribution artifacts',
-        doneMessage: dryRun ? 'Artifact publication preview complete' : 'Contribution artifacts published',
-        failedMessage: dryRun ? 'Artifact publication preview failed' : 'Contribution artifact publication failed',
-        tone: 'info',
-        step: { index: 8, total: totalSteps },
-      }, async () => this.publishArtifactsIfNeeded({
-        config,
-        headless,
-        dryRun: options.dryRun,
-        issue: selectedIssue,
-        patchDraftMarkdown,
-        prDraftMarkdown,
-        dossier,
-        memoryMarkdown: memoryService.renderMarkdown(memory),
-        inboxMarkdown: inboxService.renderMarkdown(inboxItems),
-        proofMarkdown,
-        changedFiles: implementation.changedFiles,
-        validationResults: implementation.validationResults,
-        pullRequestUrl: contributionPullRequest.url,
-      }));
+      const publishResult = localArtifactsOnly
+        ? { published: false }
+        : await ui.task({
+          title: dryRun ? 'Previewing artifact publication' : 'Publishing contribution artifacts',
+          doneMessage: dryRun ? 'Artifact publication preview complete' : 'Contribution artifacts published',
+          failedMessage: dryRun ? 'Artifact publication preview failed' : 'Contribution artifact publication failed',
+          tone: 'info',
+          step: { index: 8, total: totalSteps },
+        }, async () => this.publishArtifactsIfNeeded({
+          config,
+          headless,
+          dryRun: options.dryRun,
+          issue: selectedIssue,
+          patchDraftMarkdown,
+          prDraftMarkdown,
+          dossier,
+          memoryMarkdown: memoryService.renderMarkdown(memory),
+          inboxMarkdown: inboxService.renderMarkdown(inboxItems),
+          proofMarkdown,
+          changedFiles: implementation.changedFiles,
+          validationResults: implementation.validationResults,
+          pullRequestUrl: contributionPullRequest.url,
+        }));
 
       const finalProofRecord = {
         ...proofRecord,
@@ -450,6 +456,7 @@ export class AgentOrchestrator {
       artifactsWritten: !dryRun,
       executionOutcome: this.resolveMachineExecutionOutcome({
         draftOnly,
+        localArtifactsOnly,
         changedFiles: implementation.changedFiles,
         prCreated: Boolean(contributionPullRequest.url),
         reviewRequired,
@@ -457,6 +464,7 @@ export class AgentOrchestrator {
       executionPolicy: {
         headless,
         draftOnly,
+        localArtifactsOnly,
         runChecks,
         dryRun,
         refresh,
@@ -474,6 +482,7 @@ export class AgentOrchestrator {
     const schedulerRun = Boolean(options.schedulerRun);
     const runChecks = typeof options.runChecks === 'boolean' ? options.runChecks : !headless;
     const draftOnly = Boolean(options.draftOnly);
+    const localArtifactsOnly = Boolean(options.localArtifactsOnly);
     const refresh = Boolean(options.refresh);
     const repoPath = options.repoPath?.trim() || undefined;
     const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
@@ -489,6 +498,7 @@ export class AgentOrchestrator {
       lines: [
         runChecks ? 'Baseline checks will fire wherever the repository exposes a safe command path.' : 'This pass will stay light and skip baseline checks.',
         draftOnly ? 'Draft-only mode will preserve artifacts without applying generated file edits or opening a PR.' : 'Generated patches can be applied after repository safety checks pass.',
+        localArtifactsOnly ? 'Local artifact mode will write dossier files to disk but skip publish, commit, and push steps.' : 'Artifact publication can update the OpenMeta ledger after local files are written.',
         issueTarget
           ? `Target issue is locked to ${issueTarget.repoFullName}#${issueTarget.issueNumber}.`
           : refresh
@@ -508,7 +518,7 @@ export class AgentOrchestrator {
 
     await this.validateConfig(config);
 
-    if (headless && !schedulerRun) {
+    if (headless && !schedulerRun && !localArtifactsOnly) {
       await this.confirmManualHeadlessRun(config);
     }
 
@@ -719,21 +729,23 @@ export class AgentOrchestrator {
       });
     });
 
-    const publishResult = await this.publishArtifactsIfNeeded({
-      config,
-      headless,
-      dryRun: options.dryRun,
-      issue: selectedIssue,
-      patchDraftMarkdown,
-      prDraftMarkdown,
-      dossier,
-      memoryMarkdown: memoryService.renderMarkdown(memory),
-      inboxMarkdown: inboxService.renderMarkdown(inboxItems),
-      proofMarkdown,
-      changedFiles: implementation.changedFiles,
-      validationResults: implementation.validationResults,
-      pullRequestUrl: contributionPullRequest.url,
-    });
+    const publishResult = localArtifactsOnly
+      ? { published: false }
+      : await this.publishArtifactsIfNeeded({
+        config,
+        headless,
+        dryRun: options.dryRun,
+        issue: selectedIssue,
+        patchDraftMarkdown,
+        prDraftMarkdown,
+        dossier,
+        memoryMarkdown: memoryService.renderMarkdown(memory),
+        inboxMarkdown: inboxService.renderMarkdown(inboxItems),
+        proofMarkdown,
+        changedFiles: implementation.changedFiles,
+        validationResults: implementation.validationResults,
+        pullRequestUrl: contributionPullRequest.url,
+      });
 
     const reviewRequired =
       patchDraftResult.status !== 'success'
@@ -1924,12 +1936,17 @@ export class AgentOrchestrator {
 
   private resolveMachineExecutionOutcome(input: {
     draftOnly: boolean;
+    localArtifactsOnly: boolean;
     changedFiles: string[];
     prCreated: boolean;
     reviewRequired: boolean;
   }): MachineAgentResult['executionOutcome'] {
     if (input.reviewRequired && input.changedFiles.length === 0 && !input.prCreated) {
       return 'blocked';
+    }
+
+    if (input.localArtifactsOnly) {
+      return 'local_artifacts_written';
     }
 
     if (input.draftOnly) {

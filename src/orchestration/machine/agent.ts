@@ -8,6 +8,7 @@ export class MachineAgentFlowOrchestrator {
     headless?: boolean;
     runChecks?: boolean;
     draftOnly?: boolean;
+    localArtifactsOnly?: boolean;
     refresh?: boolean;
     repo?: string;
     repoPath?: string;
@@ -28,6 +29,7 @@ export class MachineAgentFlowOrchestrator {
         headless: options.headless ?? true,
         runChecks: options.runChecks,
         draftOnly: options.draftOnly,
+        localArtifactsOnly: options.localArtifactsOnly,
         refresh: options.refresh,
         repo: options.repo,
         repoPath: options.repoPath,

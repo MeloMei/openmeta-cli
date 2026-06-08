@@ -39,6 +39,7 @@ interface AgentMachineRunShape {
     schedulerRun?: boolean;
     runChecks?: boolean;
     draftOnly?: boolean;
+    localArtifactsOnly?: boolean;
     refresh?: boolean;
     repo?: string;
     issue?: string;
@@ -379,5 +380,85 @@ describe('machine flow result builders', () => {
     expect(saveInboxSpy).not.toHaveBeenCalled();
     expect(recordProofSpy).not.toHaveBeenCalled();
     expect(recordOutcomeSpy).not.toHaveBeenCalled();
+  });
+
+  test('machine agent can write local artifacts without publish prompts', async () => {
+    const config = createConfig();
+    const issue = createRankedIssue({ repoFullName: 'acme/demo', number: 42 });
+    const memory = createMemory();
+    const workspace = createWorkspace({
+      workspacePath: '/tmp/openmeta-demo',
+      branchName: 'openmeta/42-accessibility',
+      testResults: [],
+    });
+    const patchDraft = createPatchDraft();
+    const prDraft = createPullRequestDraft();
+    const artifacts = createArtifacts();
+    const orchestrator = new AgentOrchestrator() as unknown as AgentMachineRunShape;
+    const machineInternals = orchestrator as unknown as AgentMachineInternals;
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(machineInternals, 'validateConfig').mockResolvedValue(undefined);
+    spyOn(machineInternals, 'initializeClients').mockResolvedValue(undefined);
+    spyOn(issueRankingService, 'loadTargetIssue').mockResolvedValue([issue]);
+    spyOn(memoryService, 'load').mockReturnValue(memory);
+    spyOn(workspaceService, 'prepareWorkspace').mockResolvedValue(workspace);
+    spyOn(memoryService, 'update').mockReturnValue(memory);
+    spyOn(llmService, 'generatePatchDraft').mockResolvedValue({
+      version: '1',
+      kind: 'patch_draft',
+      status: 'success',
+      data: patchDraft,
+    });
+    spyOn(machineInternals, 'generateConcretePatch').mockResolvedValue({
+      changedFiles: [],
+      validationResults: [],
+      reviewRequired: false,
+    });
+    spyOn(llmService, 'generatePrDraft').mockResolvedValue({
+      version: '1',
+      kind: 'pull_request_draft',
+      status: 'success',
+      data: prDraft,
+    });
+    spyOn(contentService, 'formatPatchDraftMarkdown').mockReturnValue('# Patch');
+    spyOn(contentService, 'formatPullRequestDraftMarkdown').mockReturnValue('# PR');
+    spyOn(contentService, 'formatContributionDossier').mockReturnValue('# Dossier');
+    spyOn(machineInternals, 'submitContributionPullRequestIfPossible').mockResolvedValue({
+      changedFiles: [],
+      validationResults: [],
+    });
+    spyOn(machineInternals, 'prepareLocalArtifactPaths').mockReturnValue(artifacts);
+    const writeArtifactsSpy = spyOn(machineInternals, 'writeLocalArtifacts').mockImplementation(() => {});
+    const publishSpy = spyOn(machineInternals, 'publishArtifactsIfNeeded').mockResolvedValue({
+      published: false,
+    });
+    const promptSpy = spyOn(infra, 'prompt');
+    const saveInboxSpy = spyOn(inboxService, 'saveItem').mockReturnValue([createInboxItem()]);
+    spyOn(inboxService, 'renderMarkdown').mockReturnValue('# Inbox');
+    spyOn(proofOfWorkService, 'load').mockReturnValue({ records: [] });
+    spyOn(proofOfWorkService, 'renderMarkdown').mockReturnValue('# Proof');
+    const recordProofSpy = spyOn(proofOfWorkService, 'record').mockReturnValue([createProofRecord()]);
+    spyOn(memoryService, 'renderMarkdown').mockReturnValue('# Memory');
+    const recordOutcomeSpy = spyOn(memoryService, 'recordOutcome').mockReturnValue(memory);
+
+    const result = await runInMachineContext(() => orchestrator.runMachine({
+      issue: 'https://github.com/acme/demo/issues/42',
+      draftOnly: true,
+      localArtifactsOnly: true,
+    }));
+
+    expect(result.executionOutcome).toBe('local_artifacts_written');
+    expect(result.repoMutated).toBe(false);
+    expect(result.prCreated).toBe(false);
+    expect(result.artifactsWritten).toBe(true);
+    expect(result.published).toBe(false);
+    expect(result.executionPolicy.headless).toBe(true);
+    expect(writeArtifactsSpy).toHaveBeenCalledTimes(2);
+    expect(publishSpy).not.toHaveBeenCalled();
+    expect(promptSpy).not.toHaveBeenCalled();
+    expect(saveInboxSpy).toHaveBeenCalledTimes(1);
+    expect(recordProofSpy).toHaveBeenCalledTimes(1);
+    expect(recordOutcomeSpy).toHaveBeenCalledTimes(1);
   });
 });

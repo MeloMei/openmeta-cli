@@ -105,6 +105,7 @@ export function registerMachineCommand(program: Command): void {
     .option('--headless', 'Run unattended using saved automation defaults')
     .option('--run-checks', 'Execute detected baseline validation commands')
     .option('--draft-only', 'Generate artifacts without applying file edits or opening a PR')
+    .option('--local-artifacts-only', 'Write local artifacts without publishing, committing, or pushing them')
     .option('--refresh', 'Ignore cached GitHub issue discovery results')
     .option('--repo <repository>', 'Limit issue discovery to one repository')
     .option('--repo-path <path>', 'Reuse a local repository path via an isolated worktree')
@@ -114,6 +115,7 @@ export function registerMachineCommand(program: Command): void {
       headless?: boolean;
       runChecks?: boolean;
       draftOnly?: boolean;
+      localArtifactsOnly?: boolean;
       refresh?: boolean;
       repo?: string;
       repoPath?: string;

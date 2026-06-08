@@ -13,6 +13,7 @@ interface AgentRunInternals {
     schedulerRun?: boolean;
     runChecks?: boolean;
     draftOnly?: boolean;
+    localArtifactsOnly?: boolean;
     refresh?: boolean;
     repo?: string;
     repoPath?: string;
@@ -167,6 +168,27 @@ describe('AgentOrchestrator run flow', () => {
       'No viable issues found',
       'No issues met the current technical match threshold. Broaden your profile or try again later.',
     );
+  });
+
+  test('skips manual headless confirmation when draft-only local artifact mode is requested', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentRunInternals;
+    const config = createConfig();
+    const confirmSpy = spyOn(
+      orchestrator as object as { confirmManualHeadlessRun: AgentRunInternals['confirmManualHeadlessRun'] },
+      'confirmManualHeadlessRun',
+    ).mockResolvedValue(undefined);
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(orchestrator as object as { initializeClients: AgentRunInternals['initializeClients'] }, 'initializeClients').mockResolvedValue(undefined);
+    spyOn(issueRankingService, 'loadRankedIssues').mockResolvedValue([]);
+
+    await orchestrator.run({
+      headless: true,
+      draftOnly: true,
+      localArtifactsOnly: true,
+    });
+
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   test('returns early when automation cannot select an issue above the threshold', async () => {
