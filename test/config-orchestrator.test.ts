@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ConfigService, configService } from '../src/infra/config.js';
@@ -133,13 +133,114 @@ describe('ConfigOrchestrator', () => {
     expect(heroSpy).toHaveBeenCalled();
     expect(statsSpy).toHaveBeenCalled();
     expect(cardSpy).toHaveBeenCalled();
-    expect(keyValuesSpy).toHaveBeenCalledWith('GitHub', expect.arrayContaining([
-      expect.objectContaining({ label: 'Artifact repo', value: '/tmp/private-artifacts' }),
-    ]));
+    expect(keyValuesSpy).toHaveBeenCalledWith(
+      'GitHub',
+      expect.arrayContaining([expect.objectContaining({ label: 'Artifact repo', value: '/tmp/private-artifacts' })]),
+    );
     expect(keyValuesSpy).toHaveBeenCalledWith('Repository targeting', [
       { label: 'Active preset', value: 'frontend', tone: 'success' },
       { label: 'Saved presets', value: '2', tone: 'info' },
       { label: 'Active repos', value: 'vercel/next.js, facebook/react', tone: 'info' },
     ]);
+  });
+
+  test('exports config with secrets redacted by default', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('github.pat', 'ghp_export_secret');
+    await orchestrator.set('llm.apiKey', 'sk-export-secret');
+    await orchestrator.set('github.username', 'testuser');
+
+    const exportPath = join(tempRoot, 'exported.json');
+    const cardSpy = spyOn(infra.ui, 'card').mockImplementation(() => {});
+
+    await orchestrator.exportConfig(exportPath);
+
+    expect(existsSync(exportPath)).toBe(true);
+    const content = JSON.parse(readFileSync(exportPath, 'utf-8'));
+    expect(content.github.pat).toBe('<REDACTED>');
+    expect(content.llm.apiKey).toBe('<REDACTED>');
+    expect(content.github.username).toBe('testuser');
+    expect(content.userProfile).toBeDefined();
+    expect(content.scoring).toBeDefined();
+    expect(cardSpy).toHaveBeenCalled();
+  });
+
+  test('exports config with secrets included when flag is set', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('github.pat', 'ghp_include_secret');
+    await orchestrator.set('llm.apiKey', 'sk-include-secret');
+
+    const exportPath = join(tempRoot, 'exported-secrets.json');
+    spyOn(infra.ui, 'card').mockImplementation(() => {});
+
+    await orchestrator.exportConfig(exportPath, { includeSecrets: true });
+
+    const content = JSON.parse(readFileSync(exportPath, 'utf-8'));
+    expect(content.github.pat).toBe('ghp_include_secret');
+    expect(content.llm.apiKey).toBe('sk-include-secret');
+  });
+
+  test('imports config and merges non-redacted fields', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('github.pat', 'ghp_original');
+    await orchestrator.set('llm.apiKey', 'sk-original');
+
+    const exportPath = join(tempRoot, 'to-import.json');
+    spyOn(infra.ui, 'card').mockImplementation(() => {});
+
+    await orchestrator.exportConfig(exportPath);
+
+    clearSharedConfigCache();
+    await configService.load();
+
+    await orchestrator.importConfig(exportPath);
+
+    const loaded = await configService.get();
+    expect(loaded.github.pat).toBe('ghp_original');
+    expect(loaded.llm.apiKey).toBe('sk-original');
+  });
+
+  test('import preserves existing secrets when file has redacted values', async () => {
+    const orchestrator = new ConfigOrchestrator();
+
+    await orchestrator.set('github.pat', 'ghp_keep_me');
+    await orchestrator.set('llm.apiKey', 'sk-keep-me');
+    await orchestrator.set('userProfile.techStack', 'rust,go');
+
+    const exportPath = join(tempRoot, 'redacted-import.json');
+    spyOn(infra.ui, 'card').mockImplementation(() => {});
+
+    await orchestrator.exportConfig(exportPath);
+
+    const exportedContent = JSON.parse(readFileSync(exportPath, 'utf-8'));
+    exportedContent.userProfile.techStack = ['typescript', 'python'];
+
+    const modifiedPath = join(tempRoot, 'modified-import.json');
+    const { writeFileSync } = await import('fs');
+    writeFileSync(modifiedPath, JSON.stringify(exportedContent, null, 2), 'utf-8');
+
+    await orchestrator.importConfig(modifiedPath);
+
+    const loaded = await configService.get();
+    expect(loaded.github.pat).toBe('ghp_keep_me');
+    expect(loaded.llm.apiKey).toBe('sk-keep-me');
+    expect(loaded.userProfile.techStack).toEqual(['typescript', 'python']);
+  });
+
+  test('import throws on non-existent file', async () => {
+    const orchestrator = new ConfigOrchestrator();
+    await expect(orchestrator.importConfig('/nonexistent/path.json')).rejects.toThrow('File not found');
+  });
+
+  test('import throws on invalid JSON', async () => {
+    const orchestrator = new ConfigOrchestrator();
+    const badPath = join(tempRoot, 'bad.json');
+    const { writeFileSync } = await import('fs');
+    writeFileSync(badPath, 'not valid json {{{', 'utf-8');
+
+    await expect(orchestrator.importConfig(badPath)).rejects.toThrow('Failed to parse config file');
   });
 });
