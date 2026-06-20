@@ -7,7 +7,8 @@ OpenMeta CLI is an autonomous, local-first contribution agent for developers who
 
 它不是一个只会”推荐 issue”的工具。它是一条完整的开源贡献流水线：发现机会、判断价值、准备工作区、生成补丁方案、沉淀仓库记忆、记录贡献证据，并把整个过程组织成可以每天稳定运行的系统。
 
-![OpenMeta Workflow](https://raw.githubusercontent.com/awen11123/openmeta-cli/fix/improve-discovery-followup/docs/openmeta-workflow.jpg)
+<img width="930" height="1482" alt="f84f202bc8647719d91eed9e5cf75f60" src="https://github.com/user-attachments/assets/a855ea16-8655-4f61-b679-8298615e0338" />
+
 
 [中文](#中文) | [English](#english)
 
